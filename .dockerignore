@@ -1,0 +1,7 @@
+.git
+.venv
+.tmp_datarepo
+web/node_modules
+web/dist
+*.db
+
