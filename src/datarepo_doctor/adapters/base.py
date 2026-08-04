@@ -6,6 +6,10 @@ from typing import Protocol
 from datarepo_doctor.domain.models import PhaseTiming, ProbeSpec
 
 
+def elapsed_ms(start: int, end: int) -> float:
+    return round((end - start) / 1_000_000, 3)
+
+
 @dataclass(frozen=True)
 class AdapterResult:
     rows: list[dict[str, object]]

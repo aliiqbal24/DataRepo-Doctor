@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from decimal import Decimal
 
 import polars as pl
 import psycopg
@@ -11,64 +10,71 @@ from datarepo.core import (
     Filter,
     NlkDataFrame,
     ParquetTable,
-    Partition,
     PartitioningScheme,
     table,
 )
 
-_bucket = os.environ.get("DOCTOR_S3_BUCKET", "datarepo-demo")
-
-part = DeltalakeTable(
-    name="part",
-    uri=f"s3://{_bucket}/tpch/part",
+products = DeltalakeTable(
+    name="products",
+    uri="s3://aws-bigdata-blog/artifacts/delta-lake-crawler/sample_delta_table",
     schema=pa.schema(
         [
-            ("p_partkey", pa.int64()),
-            ("p_name", pa.string()),
-            ("p_brand", pa.string()),
-            ("p_retailprice", pa.decimal128(12, 2)),
+            ("product_id", pa.string()),
+            ("product_name", pa.string()),
+            ("price", pa.int64()),
+            ("CURRENCY", pa.string()),
+            ("category", pa.string()),
+            ("updated_at", pa.float64()),
         ]
     ),
-    docs_filters=[Filter("p_partkey", "in", [1, 2, 3, 4, 5])],
-    docs_columns=["p_partkey", "p_name", "p_brand", "p_retailprice"],
-    unique_columns=["p_partkey"],
-    description="Minimal TPC-H-style parts stored as Delta Lake objects in MinIO.",
+    docs_filters=[Filter("product_id", "in", ["00001", "00002", "00003", "00004", "00005"])],
+    docs_columns=["product_id", "product_name", "price", "category"],
+    unique_columns=["product_id"],
+    description="Public Delta Lake product table maintained as an AWS Big Data Blog tutorial artifact.",
+    table_metadata_args={
+        "data_input": "Public AWS S3 Delta Lake tutorial table",
+        "latency_info": "Live unsigned retrieval from Amazon S3",
+    },
 )
 
-orders = ParquetTable(
-    name="orders",
-    uri=f"s3://{_bucket}/tpch/orders",
-    partitioning=[Partition("o_orderstatus", pl.String)],
+
+energy_sources = ParquetTable(
+    name="energy_sources",
+    uri="s3://pudl.catalyst.coop/v2024.11.0/core_eia__codes_energy_sources.parquet",
+    partitioning=[],
     partitioning_scheme=PartitioningScheme.HIVE,
-    parquet_file_name="df.parquet",
-    docs_filters=[Filter("o_orderstatus", "=", "O")],
-    docs_columns=["o_orderkey", "o_custkey", "o_orderstatus", "o_totalprice", "o_orderdate"],
-    description="Minimal TPC-H-style orders stored as Hive-partitioned Parquet in MinIO.",
+    docs_columns=["code", "label", "fuel_group_eia", "fuel_phase", "description"],
+    description="Versioned public energy-source reference data from Catalyst Cooperative's PUDL project.",
+    table_metadata_args={
+        "data_input": "PUDL v2024.11.0 public Parquet release",
+        "latency_info": "Live unsigned retrieval from the PUDL public S3 bucket",
+    },
 )
 
 
 @table(  # type: ignore[untyped-decorator]
-    docs_args={"min_suppkey": 1, "max_suppkey": 4},
-    data_input="Read-only PostgreSQL supplier table",
-    latency_info="Live local query",
+    docs_args={
+        "accession_a": "OTTHUMT00000106564.1",
+        "accession_b": "OTTHUMT00000416802.1",
+    },
+    data_input="RNAcentral public read-only PostgreSQL database",
+    latency_info="Live query to EMBL-EBI public infrastructure",
 )
-def supplier(min_suppkey: int, max_suppkey: int) -> NlkDataFrame:
-    """Suppliers queried through a DataRepo custom Python function table."""
-    dsn = os.environ["DOCTOR_POSTGRES_DSN"]
-    with psycopg.connect(dsn) as connection, connection.transaction():
+def rna_xrefs(accession_a: str, accession_b: str) -> NlkDataFrame:
+    """Resolve a bounded pair of archived external RNA accessions."""
+    with psycopg.connect(os.environ["DOCTOR_RNACENTRAL_DSN"]) as connection:
         connection.execute("SET TRANSACTION READ ONLY")
         rows = connection.execute(
-            """SELECT s_suppkey, s_name, s_nationkey, s_acctbal
-                   FROM supplier
-                   WHERE s_suppkey BETWEEN %s AND %s
-                   ORDER BY s_suppkey""",
-            (min_suppkey, max_suppkey),
+            """SELECT upi, taxid, ac
+                   FROM xref
+                  WHERE ac = ANY(%s)
+                  ORDER BY ac""",
+            ([accession_a, accession_b],),
         ).fetchall()
     return pl.LazyFrame(
         {
-            "s_suppkey": [int(row[0]) for row in rows],
-            "s_name": [str(row[1]) for row in rows],
-            "s_nationkey": [int(row[2]) for row in rows],
-            "s_acctbal": [Decimal(row[3]) for row in rows],
+            "upi": [str(row[0]) for row in rows],
+            "taxid": [int(row[1]) for row in rows],
+            "ac": [str(row[2]) for row in rows],
         }
     )

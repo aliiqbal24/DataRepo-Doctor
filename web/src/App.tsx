@@ -53,6 +53,14 @@ function DetailDrawer({ check, onClose }: { check: Check; onClose: () => void })
           <p className="query-copy">{check.query_description}</p>
         </section>
         <section className="detail-section">
+          <h3>Public source provenance</h3>
+          <dl className="detail-grid">
+            <div><dt>Owner</dt><dd>{check.source_owner}</dd></div><div><dt>Version</dt><dd>{check.source_version}</dd></div>
+            <div><dt>License</dt><dd>{check.source_license}</dd></div><div><dt>Location</dt><dd><code>{check.source_uri}</code></dd></div>
+          </dl>
+          {check.source_documentation_url && <a href={check.source_documentation_url} target="_blank" rel="noreferrer">Source documentation</a>}
+        </section>
+        <section className="detail-section">
           <h3>Validation contract</h3>
           {check.validation_contract ? <>
             <p>{check.validation_contract.expected_row_count} exact rows · {check.validation_contract.selected_columns.length} declared columns · canonical sort by {check.validation_contract.sort_columns.join(', ')}</p>
@@ -127,10 +135,10 @@ export default function App() {
   }), [checks])
 
   return <>
-    <header className="topbar"><div className="brand-mark" aria-hidden="true">D</div><div><strong>DataRepo Doctor</strong><span>Retrieval monitor</span></div><div className="profile"><i aria-hidden="true" />doctor_reader · local</div></header>
+    <header className="topbar"><div className="brand-mark" aria-hidden="true">D</div><div><strong>DataRepo Doctor</strong><span>Retrieval monitor</span></div><div className="profile"><i aria-hidden="true" />doctor_reader · public internet</div></header>
     <main>
       <section className="intro">
-        <div><span className="eyebrow">Synthetic retrieval health</span><h1>Can scientists get the whole result?</h1><p>Real, bounded reads through supported DataRepo access paths. Health means the complete result passed schema, row count, and fingerprint validation.</p></div>
+        <div><span className="eyebrow">Live public-source retrieval health</span><h1>Can scientists get the whole result?</h1><p>Real, bounded reads from public AWS, PUDL, and RNAcentral sources through supported DataRepo access paths. Health means the complete result passed schema, row count, and fingerprint validation.</p></div>
         <div className="summary" aria-label="Check summary"><div><strong>{counts.healthy}</strong><span>Healthy</span></div><div><strong>{counts.unhealthy}</strong><span>Unhealthy</span></div><div><strong>{counts.unchecked}</strong><span>Not checked</span></div></div>
       </section>
       {error && <div className="error-banner" role="alert">{error}</div>}

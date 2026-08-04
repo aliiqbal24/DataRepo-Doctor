@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from datarepo_doctor.domain.models import ProbeOutcome, ProbeSpec
@@ -35,6 +35,9 @@ class DoctorRepository:
         Base.metadata.create_all(self.engine)
         baseline = _utc(now or datetime.now(UTC)).replace(second=0, microsecond=0)
         with self.sessions.begin() as session:
+            configured_ids = {probe.check_id for probe in probes}
+            session.execute(delete(CheckScheduleRow).where(CheckScheduleRow.check_id.not_in(configured_ids)))
+            session.execute(delete(LatestProbeRunRow).where(LatestProbeRunRow.check_id.not_in(configured_ids)))
             existing = set(session.scalars(select(CheckScheduleRow.check_id)))
             for probe in probes:
                 if probe.check_id not in existing:
