@@ -1,6 +1,7 @@
 name: datarepo-doctor
 services:
   minio:
+    profiles: ["test"]
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
     environment:
@@ -15,6 +16,7 @@ services:
       retries: 30
 
   postgres:
+    profiles: ["test"]
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: datarepo_demo
@@ -29,6 +31,7 @@ services:
       retries: 30
 
   minio-init:
+    profiles: ["test"]
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -48,11 +51,23 @@ services:
       minio: {condition: service_healthy}
     restart: "no"
 
-  seed:
+  configure:
     build:
       context: .
       target: runtime
     command: ["python", "-m", "datarepo_doctor.seed"]
+    user: root
+    environment:
+      ROAPI_CONFIG_PATH: /generated/roapi.yaml
+    volumes: ["generated:/generated"]
+    restart: "no"
+
+  local-seed:
+    profiles: ["test"]
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "datarepo_doctor.seed", "--local-fixtures"]
     user: root
     env_file: [.env]
     environment:
@@ -64,8 +79,7 @@ services:
       DOCTOR_POSTGRES_PASSWORD: ${DOCTOR_POSTGRES_PASSWORD:-change-me-doctor-postgres}
       DOCTOR_S3_ENDPOINT: http://minio:9000
       DOCTOR_S3_BUCKET: datarepo-demo
-      ROAPI_CONFIG_PATH: /generated/roapi.yaml
-    volumes: ["generated:/generated"]
+      DOCTOR_POSTGRES_DSN: postgresql://doctor_reader:${DOCTOR_POSTGRES_PASSWORD:-change-me-doctor-postgres}@postgres:5432/datarepo_demo
     depends_on:
       minio-init: {condition: service_completed_successfully}
       postgres: {condition: service_healthy}
@@ -77,16 +91,12 @@ services:
       dockerfile: infra/roapi.Dockerfile
     command: ["-c", "/config/roapi.yaml"]
     environment:
-      AWS_ACCESS_KEY_ID: ${DOCTOR_S3_ACCESS_KEY:-doctor_reader}
-      AWS_SECRET_ACCESS_KEY: ${DOCTOR_S3_SECRET_KEY:-change-me-doctor-s3}
-      AWS_REGION: us-east-1
-      AWS_ENDPOINT_URL: http://minio:9000
-      AWS_ALLOW_HTTP: "true"
-      AWS_S3_ALLOW_UNSAFE_RENAME: "true"
+      AWS_REGION: us-west-2
+      AWS_SKIP_SIGNATURE: "true"
     ports: ["8080:8080"]
     volumes: ["generated:/config:ro"]
     depends_on:
-      seed: {condition: service_completed_successfully}
+      configure: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/schema')"]
       interval: 3s
@@ -99,16 +109,14 @@ services:
       target: runtime
     env_file: [.env]
     environment:
-      DOCTOR_S3_ENDPOINT: http://minio:9000
       DOCTOR_ROAPI_URL: http://roapi:8080
-      DOCTOR_POSTGRES_DSN: postgresql://doctor_reader:${DOCTOR_POSTGRES_PASSWORD:-change-me-doctor-postgres}@postgres:5432/datarepo_demo
+      DOCTOR_RNACENTRAL_DSN: postgresql://reader:${DOCTOR_RNACENTRAL_PASSWORD:-replace-with-public-reader-password}@hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs
       DOCTOR_DATABASE_URL: sqlite:////data/datarepo-doctor.db
-      AWS_ALLOW_HTTP: "true"
-      AWS_S3_ALLOW_UNSAFE_RENAME: "true"
+      AWS_SKIP_SIGNATURE: "true"
     ports: ["8000:8000"]
     volumes: ["app-data:/data"]
     depends_on:
-      seed: {condition: service_completed_successfully}
+      configure: {condition: service_completed_successfully}
       roapi: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/healthz')"]
@@ -127,12 +135,14 @@ services:
       DOCTOR_S3_ENDPOINT: http://minio:9000
       DOCTOR_ROAPI_URL: http://roapi:8080
       DOCTOR_POSTGRES_DSN: postgresql://doctor_reader:${DOCTOR_POSTGRES_PASSWORD:-change-me-doctor-postgres}@postgres:5432/datarepo_demo
+      DOCTOR_RNACENTRAL_DSN: postgresql://reader:${DOCTOR_RNACENTRAL_PASSWORD:-replace-with-public-reader-password}@hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs
       DOCTOR_DATABASE_URL: sqlite:////tmp/datarepo-doctor-test.db
       DOCTOR_SCHEDULES_ENABLED: "false"
       AWS_ALLOW_HTTP: "true"
       AWS_S3_ALLOW_UNSAFE_RENAME: "true"
+      AWS_SKIP_SIGNATURE: "true"
     depends_on:
-      seed: {condition: service_completed_successfully}
+      local-seed: {condition: service_completed_successfully}
       roapi: {condition: service_healthy}
 
 volumes:

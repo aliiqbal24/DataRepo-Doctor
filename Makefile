@@ -7,17 +7,17 @@ down:
 	docker compose down
 
 seed:
-	docker compose run --rm seed
+	docker compose run --rm configure
 
 test:
 	pytest tests/unit
 
 test-integration:
-	pytest -m integration
+	docker compose --profile test run --rm --build test
 
 lint:
-	ruff check src demo_catalog tests
-	mypy src/datarepo_doctor
+	ruff check .
+	mypy src
 	cd web && npm run lint && npm run typecheck
 
 web-test:
@@ -25,4 +25,3 @@ web-test:
 
 build:
 	cd web && npm run build
-

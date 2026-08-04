@@ -17,11 +17,12 @@ from datarepo_doctor.execution.engine import ProcessProbeExecutor
 from datarepo_doctor.execution.queue import ProbeQueue
 from datarepo_doctor.persistence.repository import DoctorRepository
 from datarepo_doctor.registry import PROBES
+from tests.local_probes import LOCAL_PROBES
 
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.parametrize("spec", PROBES, ids=lambda spec: spec.check_id)
+@pytest.mark.parametrize("spec", PROBES + LOCAL_PROBES, ids=lambda spec: spec.check_id)
 def test_real_access_path_materializes_and_validates_complete_result(spec):
     outcome = ProcessProbeExecutor().run(spec)
     assert outcome.health == Health.HEALTHY, outcome.model_dump()
@@ -30,12 +31,13 @@ def test_real_access_path_materializes_and_validates_complete_result(spec):
 
 def test_wrong_contracts_have_precise_failure_modes():
     executor = ProcessProbeExecutor()
-    wrong_type = PROBES[0].expected_schema[0].model_copy(update={"type": "string"})
-    schema = PROBES[0].model_copy(
-        update={"expected_schema": (wrong_type,) + PROBES[0].expected_schema[1:]}
+    fixture = LOCAL_PROBES[0]
+    wrong_type = fixture.expected_schema[0].model_copy(update={"type": "string"})
+    schema = fixture.model_copy(
+        update={"expected_schema": (wrong_type,) + fixture.expected_schema[1:]}
     )
-    count = PROBES[0].model_copy(update={"expected_row_count": 999})
-    fingerprint = PROBES[0].model_copy(update={"expected_sha256": "f" * 64})
+    count = fixture.model_copy(update={"expected_row_count": 999})
+    fingerprint = fixture.model_copy(update={"expected_sha256": "f" * 64})
     assert executor.run(schema).failure_mode == FailureMode.SCHEMA_MISMATCH
     assert executor.run(count).failure_mode == FailureMode.ROW_COUNT_MISMATCH
     assert executor.run(fingerprint).failure_mode == FailureMode.RESULT_FINGERPRINT_MISMATCH
@@ -47,13 +49,13 @@ def test_stopped_roapi_is_connection_error(monkeypatch):
 
 
 def test_stopped_postgres_is_connection_error(monkeypatch):
-    monkeypatch.setenv("DOCTOR_POSTGRES_DSN", "postgresql://doctor_reader:unused@127.0.0.1:1/datarepo_demo")
+    monkeypatch.setenv("DOCTOR_RNACENTRAL_DSN", "postgresql://reader:unused@127.0.0.1:1/public")
     assert ProcessProbeExecutor().run(PROBES[2]).failure_mode == FailureMode.CONNECTION_ERROR
 
 
 def test_invalid_object_credentials_are_unhealthy(monkeypatch):
     monkeypatch.setenv("DOCTOR_S3_SECRET_KEY", "invalid")
-    outcome = ProcessProbeExecutor().run(PROBES[0])
+    outcome = ProcessProbeExecutor().run(LOCAL_PROBES[0])
     assert outcome.health == Health.UNHEALTHY
     assert outcome.failure_mode in {
         FailureMode.AUTHENTICATION_ERROR,
@@ -64,7 +66,7 @@ def test_invalid_object_credentials_are_unhealthy(monkeypatch):
 
 def test_invalid_object_path_has_truthful_mode(monkeypatch):
     monkeypatch.setenv("DOCTOR_S3_BUCKET", "datarepo-demo-missing")
-    outcome = ProcessProbeExecutor().run(PROBES[0])
+    outcome = ProcessProbeExecutor().run(LOCAL_PROBES[0])
     assert outcome.failure_mode in {FailureMode.SOURCE_NOT_FOUND, FailureMode.QUERY_EXECUTION_ERROR}
 
 

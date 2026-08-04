@@ -10,8 +10,7 @@ import httpx
 from datarepo_doctor.domain.models import FailureMode, PhaseTiming, ProbeSpec, Stage
 from datarepo_doctor.execution.context import execution_stage
 
-from .base import AdapterResult
-from .python_datarepo import _elapsed_ms
+from .base import AdapterResult, elapsed_ms
 
 
 def _sql_literal(value: Any) -> str:
@@ -41,6 +40,25 @@ def _build_sql(spec: ProbeSpec) -> str:
     )
 
 
+def _normalize_json_rows(decoded: object, spec: ProbeSpec) -> list[dict[str, Any]]:
+    if not isinstance(decoded, list) or not all(isinstance(row, dict) for row in decoded):
+        raise ValueError("Unexpected response shape")
+    nullable = {field.name for field in spec.expected_schema if field.nullable}
+    rows: list[dict[str, Any]] = []
+    for row in decoded:
+        normalized: dict[str, Any] = {}
+        for column in spec.selected_columns:
+            if column in row:
+                normalized[column] = row[column]
+            elif column in nullable:
+                # ROAPI omits null-valued properties from its JSON object encoding.
+                normalized[column] = None
+            else:
+                raise ValueError("Required response column is absent")
+        rows.append(normalized)
+    return rows
+
+
 class RoapiHttpAdapter:
     def execute(self, spec: ProbeSpec) -> AdapterResult:
         started = perf_counter_ns()
@@ -57,16 +75,14 @@ class RoapiHttpAdapter:
         transferred = perf_counter_ns()
         with execution_stage(Stage.RESPONSE_DECODE, FailureMode.RESPONSE_DECODE_ERROR):
             decoded = json.loads(response.content)
-            if not isinstance(decoded, list) or not all(isinstance(row, dict) for row in decoded):
-                raise ValueError("Unexpected response shape")
-            rows = [{column: row[column] for column in spec.selected_columns} for row in decoded]
+            rows = _normalize_json_rows(decoded, spec)
         materialized = perf_counter_ns()
         return AdapterResult(
             rows=rows,
-            user_query_latency_ms=_elapsed_ms(started, materialized),
+            user_query_latency_ms=elapsed_ms(started, materialized),
             phases=(
-                PhaseTiming(name="request_setup", duration_ms=_elapsed_ms(started, setup)),
-                PhaseTiming(name="connect_server_transfer", duration_ms=_elapsed_ms(setup, transferred)),
-                PhaseTiming(name="response_decode", duration_ms=_elapsed_ms(transferred, materialized)),
+                PhaseTiming(name="request_setup", duration_ms=elapsed_ms(started, setup)),
+                PhaseTiming(name="connect_server_transfer", duration_ms=elapsed_ms(setup, transferred)),
+                PhaseTiming(name="response_decode", duration_ms=elapsed_ms(transferred, materialized)),
             ),
         )

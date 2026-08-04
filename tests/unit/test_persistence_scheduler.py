@@ -26,6 +26,15 @@ def test_initial_stagger_and_override_survive_restart(repository):
     assert restarted.schedule(PROBES[1].check_id).interval_minutes == 120
 
 
+def test_removed_registry_checks_are_pruned_on_restart(repository):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    repository.initialize(PROBES, now)
+
+    repository.initialize(PROBES[1:], now + timedelta(minutes=1))
+
+    assert PROBES[0].check_id not in repository.schedules()
+
+
 @pytest.mark.asyncio
 async def test_manual_run_does_not_change_cadence(repository):
     now = datetime(2026, 1, 1, tzinfo=UTC)

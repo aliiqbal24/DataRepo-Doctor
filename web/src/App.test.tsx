@@ -6,6 +6,8 @@ import App from './App'
 const check = {
   check_id: 'delta-part-sdk', display_name: 'Part / Delta', description: 'Bounded read',
   physical_source: 'Delta Lake · MinIO', access_method: 'python_sdk', catalog: 'demo_catalog.catalog',
+  source_owner: 'Public source owner', source_uri: 's3://public/example', source_version: 'v1',
+  source_license: 'CC-BY-4.0', source_documentation_url: 'https://example.com/source',
   database: 'tpch', table: 'part', environment: 'local', credential_profile: 'doctor_reader',
   query_description: 'Select declared columns with literals redacted.', spec_version: '1', spec_hash: 'a'.repeat(64),
   validation_contract: { expected_row_count: 10, selected_columns: ['partkey', 'name'], sort_columns: ['partkey'], expected_sha256: 'b'.repeat(64) },
@@ -28,5 +30,6 @@ describe('dashboard', () => {
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('doctor_reader')
     expect(dialog).toHaveTextContent('10 exact rows')
+    expect(dialog).toHaveTextContent('Public source owner')
   })
 })

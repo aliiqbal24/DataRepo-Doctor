@@ -27,6 +27,11 @@ export interface Check {
   display_name: string
   description: string
   physical_source: string
+  source_owner: string
+  source_uri: string
+  source_version: string
+  source_license: string
+  source_documentation_url: string | null
   access_method: 'python_sdk' | 'roapi_http'
   catalog: string
   database: string
@@ -48,4 +53,3 @@ export interface Check {
     timeout_seconds: number
   }
 }
-

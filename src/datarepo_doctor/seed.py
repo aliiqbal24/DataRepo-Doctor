@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -124,19 +126,6 @@ def _seed_postgres() -> None:
         connection.execute("ALTER ROLE doctor_reader SET default_transaction_read_only = on")
 
 
-def _expected_rows(check_id: str) -> list[dict[str, object]]:
-    if check_id == "delta-part-sdk":
-        return PART_ROWS[:5]
-    if check_id == "postgres-supplier-function":
-        return SUPPLIER_ROWS[:4]
-    rows = [
-        row
-        for row in ORDER_ROWS
-        if row["o_orderstatus"] == "O" and cast(int, row["o_orderkey"]) <= 6
-    ]
-    return cast(list[dict[str, object]], rows)
-
-
 def _write_generated_contracts() -> None:
     output = Path(os.getenv("ROAPI_CONFIG_PATH", "infra/generated/roapi.yaml"))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +136,13 @@ def _write_generated_contracts() -> None:
 
     from demo_catalog.catalog import DEMO_CATALOG
 
-    tables = export_to_roapi_tables(DEMO_CATALOG)
+    tables = [
+        table
+        for table in export_to_roapi_tables(DEMO_CATALOG)
+        if table.get("name") == "public_science_energy_sources"
+    ]
+    if len(tables) != 1:
+        raise RuntimeError("Expected exactly one public PUDL ROAPI export")
     output.write_text(
         yaml.safe_dump(
             {"addr": {"http": "0.0.0.0:8080"}, "tables": tables},
@@ -155,25 +150,56 @@ def _write_generated_contracts() -> None:
         ),
         encoding="utf-8",
     )
-    expectations: dict[str, dict[str, object]] = {}
-    for spec in PROBES:
-        rows = [
-            {column: row[column] for column in spec.selected_columns} for row in _expected_rows(spec.check_id)
-        ]
-        actual = result_sha256(rows, spec)
-        if actual != spec.expected_sha256:
-            raise RuntimeError(f"Checked-in fingerprint is stale for {spec.check_id}")
-        expectations[spec.check_id] = {"row_count": len(rows), "sha256": actual}
+    expectations = {
+        spec.check_id: {
+            "row_count": spec.expected_row_count,
+            "sha256": spec.expected_sha256,
+            "source_version": spec.source_version,
+        }
+        for spec in PROBES
+    }
     output.with_name("expectations.json").write_text(
         json.dumps(expectations, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
+def _verify_local_fixture_contracts() -> None:
+    from tests.local_probes import LOCAL_PROBES
+
+    expected_rows: dict[str, Sequence[Mapping[str, object]]] = {
+        "fixture-delta-part": PART_ROWS[:5],
+        "fixture-parquet-orders": [
+            row
+            for row in ORDER_ROWS
+            if row["o_orderstatus"] == "O" and cast(int, row["o_orderkey"]) <= 6
+        ],
+        "fixture-postgres-supplier": SUPPLIER_ROWS[:4],
+    }
+    for spec in LOCAL_PROBES:
+        rows = [
+            {column: row[column] for column in spec.selected_columns}
+            for row in expected_rows[spec.check_id]
+        ]
+        if result_sha256(rows, spec) != spec.expected_sha256:
+            raise RuntimeError(f"Local fixture fingerprint is stale for {spec.check_id}")
+
+
 def main() -> None:
-    _seed_objects()
-    _seed_postgres()
+    parser = argparse.ArgumentParser(description="Prepare DataRepo Doctor source configuration")
+    parser.add_argument(
+        "--local-fixtures",
+        action="store_true",
+        help="seed controlled MinIO/PostgreSQL sources for integration and fault tests",
+    )
+    args = parser.parse_args()
+    if args.local_fixtures:
+        _seed_objects()
+        _seed_postgres()
+        _verify_local_fixture_contracts()
+        print("Local integration fixtures are seeded and verified.")
+        return
     _write_generated_contracts()
-    print("Seed complete: MinIO, PostgreSQL, ROAPI config, and fingerprints are ready.")
+    print("Public-source ROAPI configuration and checked-in contracts are ready.")
 
 
 if __name__ == "__main__":

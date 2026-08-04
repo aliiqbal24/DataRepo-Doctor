@@ -8,14 +8,16 @@ from typing import Any
 import boto3
 from datarepo.core import Filter
 
-from datarepo_doctor.domain.models import FailureMode, PhaseTiming, ProbeSpec, Stage
+from datarepo_doctor.domain.models import (
+    FailureMode,
+    ObjectStoreProfile,
+    PhaseTiming,
+    ProbeSpec,
+    Stage,
+)
 from datarepo_doctor.execution.context import execution_stage
 
-from .base import AdapterResult
-
-
-def _elapsed_ms(start: int, end: int) -> float:
-    return round((end - start) / 1_000_000, 3)
+from .base import AdapterResult, elapsed_ms
 
 
 class PythonDataRepoAdapter:
@@ -36,13 +38,20 @@ class PythonDataRepoAdapter:
         if spec.filters:
             kwargs["filters"] = tuple(Filter(item.column, item.operator, item.value) for item in spec.filters)
         kwargs["columns"] = list(spec.selected_columns)
-        if spec.table in {"part", "orders"}:
+        if spec.object_store_profile == ObjectStoreProfile.LOCAL_MINIO:
+            os.environ.pop("AWS_SKIP_SIGNATURE", None)
             kwargs["boto3_session"] = boto3.Session(
                 aws_access_key_id=os.environ["DOCTOR_S3_ACCESS_KEY"],
                 aws_secret_access_key=os.environ["DOCTOR_S3_SECRET_KEY"],
                 region_name=os.getenv("DOCTOR_S3_REGION", "us-east-1"),
             )
             kwargs["endpoint_url"] = os.environ["DOCTOR_S3_ENDPOINT"]
+        elif spec.object_store_profile == ObjectStoreProfile.PUBLIC_AWS_UNSIGNED:
+            # DataRepo delegates public S3 reads to delta-rs/Polars. Both honor
+            # these object-store settings when no signed boto3 session is passed.
+            os.environ["AWS_SKIP_SIGNATURE"] = "true"
+            if spec.object_store_region:
+                os.environ["AWS_REGION"] = spec.object_store_region
 
         with execution_stage(Stage.QUERY, FailureMode.QUERY_EXECUTION_ERROR):
             lazy_frame = database.table(spec.table, **kwargs)
@@ -52,17 +61,17 @@ class PythonDataRepoAdapter:
         materialized = perf_counter_ns()
         return AdapterResult(
             rows=rows,
-            user_query_latency_ms=_elapsed_ms(started, materialized),
+            user_query_latency_ms=elapsed_ms(started, materialized),
             phases=(
-                PhaseTiming(name="catalog_import", duration_ms=_elapsed_ms(started, imported)),
-                PhaseTiming(name="table_resolution", duration_ms=_elapsed_ms(imported, resolved)),
+                PhaseTiming(name="catalog_import", duration_ms=elapsed_ms(started, imported)),
+                PhaseTiming(name="table_resolution", duration_ms=elapsed_ms(imported, resolved)),
                 PhaseTiming(
                     name="query_construction_and_eager_access",
-                    duration_ms=_elapsed_ms(resolved, constructed),
+                    duration_ms=elapsed_ms(resolved, constructed),
                 ),
                 PhaseTiming(
                     name="remaining_materialization",
-                    duration_ms=_elapsed_ms(constructed, materialized),
+                    duration_ms=elapsed_ms(constructed, materialized),
                 ),
             ),
         )

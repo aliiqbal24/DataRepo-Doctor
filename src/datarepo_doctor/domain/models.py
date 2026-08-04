@@ -15,6 +15,12 @@ class AccessMethod(StrEnum):
     ROAPI_HTTP = "roapi_http"
 
 
+class ObjectStoreProfile(StrEnum):
+    NONE = "none"
+    LOCAL_MINIO = "local_minio"
+    PUBLIC_AWS_UNSIGNED = "public_aws_unsigned"
+
+
 class Health(StrEnum):
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
@@ -77,6 +83,11 @@ class ProbeSpec(BaseModel):
     display_name: str
     description: str
     physical_source: str
+    source_owner: str = "Local fixture"
+    source_uri: str = "local://fixture"
+    source_version: str = "fixture-v1"
+    source_license: str = "Project test fixture"
+    source_documentation_url: str | None = None
     catalog: str
     database: str
     table: str
@@ -93,6 +104,8 @@ class ProbeSpec(BaseModel):
     phase_offset_minutes: int = Field(ge=0)
     environment: str = "local"
     credential_profile: Literal["doctor_reader"] = "doctor_reader"
+    object_store_profile: ObjectStoreProfile = ObjectStoreProfile.NONE
+    object_store_region: str | None = None
     query_description: str
     spec_version: str = "1"
 
