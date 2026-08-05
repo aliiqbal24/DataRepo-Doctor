@@ -99,7 +99,6 @@ class ProbeQueue:
                         self._probes[check_id],
                         FailureMode.WORKER_CRASH,
                         "The probe executor exited without an outcome.",
-                        0,
                     )
                 self._repository.save_outcome(outcome)
             finally:

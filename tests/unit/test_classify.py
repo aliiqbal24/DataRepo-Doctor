@@ -3,9 +3,8 @@ import socket
 import httpx
 import pytest
 
-from datarepo_doctor.models import FailureMode, Stage
+from datarepo_doctor.models import FailureMode
 from datarepo_doctor.runner import (
-    StageError,
     classify_exception,
     safe_exception_detail,
     sanitize_error_message,
@@ -16,24 +15,23 @@ from datarepo_doctor.validation import FingerprintMismatch, SchemaMismatch
 @pytest.mark.parametrize(
     ("exc", "mode"),
     [
-        (SchemaMismatch(), FailureMode.SCHEMA_MISMATCH),
-        (FingerprintMismatch(), FailureMode.RESULT_FINGERPRINT_MISMATCH),
-        (socket.gaierror(), FailureMode.DNS_ERROR),
-        (FileNotFoundError(), FailureMode.SOURCE_NOT_FOUND),
+        (SchemaMismatch(), FailureMode.VALIDATION_ERROR),
+        (FingerprintMismatch(), FailureMode.VALIDATION_ERROR),
+        (socket.gaierror(), FailureMode.CONNECTION_ERROR),
+        (FileNotFoundError(), FailureMode.QUERY_ERROR),
         (ConnectionRefusedError(), FailureMode.CONNECTION_ERROR),
     ],
 )
 def test_typed_exception_classification(exc, mode):
-    wrapped = StageError(Stage.QUERY, FailureMode.QUERY_EXECUTION_ERROR, exc)
-    assert classify_exception(wrapped)[1] == mode
+    assert classify_exception(exc)[0] == mode
 
 
 def test_http_status_classification():
     request = httpx.Request("GET", "http://safe.invalid")
     response = httpx.Response(403, request=request)
     exc = httpx.HTTPStatusError("ignored", request=request, response=response)
-    stage, mode, summary = classify_exception(StageError(Stage.QUERY, FailureMode.HTTP_ERROR, exc))
-    assert (stage, mode) == (Stage.QUERY, FailureMode.AUTHORIZATION_ERROR)
+    mode, summary = classify_exception(exc)
+    assert mode == FailureMode.QUERY_ERROR
     assert "safe.invalid" not in summary
 
 

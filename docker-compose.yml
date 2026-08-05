@@ -111,7 +111,7 @@ services:
     environment:
       DOCTOR_ROAPI_URL: http://roapi:8080
       DOCTOR_RNACENTRAL_DSN: postgresql://reader:${DOCTOR_RNACENTRAL_PASSWORD:-replace-with-public-reader-password}@hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs
-      DOCTOR_DATABASE_URL: sqlite:////data/datarepo-doctor.db
+      DOCTOR_DATABASE_PATH: /data/datarepo-doctor.db
       AWS_SKIP_SIGNATURE: "true"
     ports: ["8000:8000"]
     volumes: ["app-data:/data"]
@@ -136,7 +136,7 @@ services:
       DOCTOR_ROAPI_URL: http://roapi:8080
       DOCTOR_POSTGRES_DSN: postgresql://doctor_reader:${DOCTOR_POSTGRES_PASSWORD:-change-me-doctor-postgres}@postgres:5432/datarepo_demo
       DOCTOR_RNACENTRAL_DSN: postgresql://reader:${DOCTOR_RNACENTRAL_PASSWORD:-replace-with-public-reader-password}@hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs
-      DOCTOR_DATABASE_URL: sqlite:////tmp/datarepo-doctor-test.db
+      DOCTOR_DATABASE_PATH: /tmp/datarepo-doctor-test.db
       DOCTOR_SCHEDULES_ENABLED: "false"
       AWS_ALLOW_HTTP: "true"
       AWS_S3_ALLOW_UNSAFE_RENAME: "true"

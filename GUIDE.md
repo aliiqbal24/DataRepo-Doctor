@@ -119,7 +119,7 @@ The simplified Python package has a short reading order:
 | `models.py` | Typed probe and outcome contracts |
 | `checks.py` | The four real check definitions |
 | `orchestration.py` | FIFO queue and recurring scheduler |
-| `runner.py` | Child process, timeout, stages, errors, and timing |
+| `runner.py` | Child process, timeout, safe errors, and outcomes |
 | `retrieval.py` | DataRepo Python and ROAPI retrieval code |
 | `validation.py` | Canonical result validation and hashing |
 | `storage.py` | Two SQLite tables and repository operations |
@@ -328,7 +328,7 @@ The primary latency stops only after the result has been fully materialized or t
 
 ### Step 10: full validation
 
-The child validates exact row count, schema/types, deterministic sort, and SHA-256. Validation has its own diagnostic phase timing.
+The child validates exact row count, schema/types, deterministic sort, and SHA-256 after the query latency clock has stopped.
 
 ### Step 11: approved display rows are copied and working rows are discarded
 
@@ -336,13 +336,13 @@ For a probe with `display_result_rows=True`, the child copies the already valida
 
 ### Step 12: safe outcome crosses the pipe
 
-A healthy outcome contains query latency, diagnostic phases, total duration, versions, environment, identity, and—only for an opted-in public probe—the bounded result rows used by the dashboard.
+A healthy outcome contains the one user-query latency, versions, environment, identity, and—only for an opted-in public probe—the bounded result rows used by the dashboard.
 
-An unhealthy outcome contains no query latency. It contains stage, mode, safe summary, optional scrubbed detail, and total duration.
+An unhealthy outcome contains no query latency. It contains one of five failure modes, a safe summary, and an optional scrubbed detail.
 
 ### Step 13: parent timeout behavior
 
-The parent waits at most `timeout_seconds`. If the child is still alive, the parent kills and reaps it and records `timeout`. Partial elapsed time is total probe duration, not user query latency.
+The parent waits at most `timeout_seconds`. If the child is still alive, the parent kills and reaps it and records `timeout`. Partial elapsed time is not retained as query latency.
 
 If the child exits without a serialized outcome, the parent records `worker_crash`.
 
@@ -394,35 +394,11 @@ Latency never determines health. A successful 200 ms and successful 20-second re
 
 Timeout is a safety decision, not a claim that a query is “slow.” Once killed, the query did not successfully complete, so its query latency is `null`.
 
-Diagnostic phases are honest rather than artificially identical:
-
-- Python: catalog import, table resolution, query construction/eager access, remaining materialization.
-- ROAPI: request setup, connect/server/transfer as observable from the client, response decode.
-- Both: validation and total probe duration.
-
-The application does not claim source execution time or time-to-first-row because those boundaries are not reliably exposed by every library.
+The application intentionally records only the end-to-end user-query latency. It does not claim source execution time, time-to-first-row, or internal phase timings because those boundaries are not reliably exposed by every library and are not needed for health.
 
 ## 12. Failures and privacy
 
-The runner wraps risky blocks with an explicit stage. Typed exception chains determine the most truthful mode available.
-
-| Stage | What was happening |
-|---|---|
-| `catalog_import` | Importing the configured Python catalog |
-| `table_resolution` | Resolving database and table |
-| `query` | Constructing/executing/materializing retrieval |
-| `response_decode` | Decoding and normalizing complete ROAPI JSON |
-| `validation` | Checking contract and fingerprint |
-| `worker` | Parent/child lifecycle |
-
-Stable modes include authentication, authorization, DNS, connection, source-not-found, HTTP, execution, decode, schema, count, fingerprint, timeout, crash, and unknown.
-
-The UI shows four layers when safe:
-
-1. stage;
-2. stable machine-readable mode;
-3. safe human summary; and
-4. optional exception class plus scrubbed reason.
+The runner uses five stable modes: `connection_error`, `query_error`, `validation_error`, `timeout`, and `worker_crash`. Validation summaries still say whether schema, count, or fingerprint failed. The UI shows the mode, safe human summary, and optional exception class plus scrubbed reason.
 
 Raw exceptions are dangerous. A driver can include a DSN, URL query string, SQL literal, secret assignment, object path, or returned row. The sanitizer removes URLs, credential-like assignments, quoted values, long token-like strings, line breaks, and excess length. For unknown/database/object-store messages, it exposes only the exception class rather than guessing that arbitrary text is safe.
 
@@ -450,7 +426,7 @@ After restart, persisted schedules are restored. If several are overdue, `enqueu
 
 ## 14. SQLite persistence
 
-SQLAlchemy maps two tables:
+Python's built-in `sqlite3` module maintains two tables without an ORM:
 
 ### `check_schedule`
 
@@ -582,9 +558,9 @@ There is no npm step. Browser behavior is verified against the production FastAP
 Fault injection belongs in tests or temporary local environment changes, not the default registry.
 
 - Stop ROAPI, run its check, and expect `connection_error` with no latency.
-- Use a test probe with the wrong expected schema and expect `schema_mismatch`.
-- Change expected count and expect `row_count_mismatch`.
-- Change one controlled fixture value without changing count/schema and expect `result_fingerprint_mismatch`.
+- Use a test probe with the wrong expected schema and expect `validation_error` with a schema summary.
+- Change expected count and expect `validation_error` with an exact-count summary.
+- Change one controlled fixture value without changing count/schema and expect `validation_error` with a fingerprint summary.
 - Run the hanging test function and expect `timeout`, followed by a healthy queued check.
 - Run the crashing test function and expect `worker_crash`, followed by a healthy queued check.
 
@@ -611,7 +587,7 @@ Do not add a direct source ping, catalog-only import, `.limit(1)`, or metadata l
 
 ### App is alive but checks are unhealthy
 
-That is possible and correct. `/api/healthz` proves only FastAPI liveness. Expand the failed row and inspect stage, mode, and safe detail.
+That is possible and correct. `/api/healthz` proves only FastAPI liveness. Expand the failed row and inspect its mode, safe summary, and scrubbed detail.
 
 ### RNAcentral fails
 

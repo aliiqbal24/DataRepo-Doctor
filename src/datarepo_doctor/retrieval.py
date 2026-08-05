@@ -17,13 +17,9 @@ import httpx
 
 from datarepo_doctor.models import (
     AccessMethod,
-    FailureMode,
     ObjectStoreProfile,
-    PhaseTiming,
     ProbeSpec,
-    Stage,
 )
-from datarepo_doctor.runner import execution_stage
 
 
 def _elapsed_ms(start: int, end: int) -> float:
@@ -34,7 +30,6 @@ def _elapsed_ms(start: int, end: int) -> float:
 class RetrievalResult:
     rows: list[dict[str, Any]]
     user_query_latency_ms: float
-    phases: tuple[PhaseTiming, ...]
 
 
 def retrieve(spec: ProbeSpec) -> RetrievalResult:
@@ -90,16 +85,11 @@ def _retrieve_with_python(spec: ProbeSpec) -> RetrievalResult:
     from datarepo.core import Filter
 
     started = perf_counter_ns()
-    with execution_stage(Stage.CATALOG_IMPORT, FailureMode.CATALOG_IMPORT_ERROR):
-        module_name, attribute = spec.catalog.split(":", 1)
-        catalog = getattr(importlib.import_module(module_name), attribute)
-    imported = perf_counter_ns()
-
-    with execution_stage(Stage.TABLE_RESOLUTION, FailureMode.TABLE_NOT_FOUND):
-        database = catalog.db(spec.database)
-        if spec.table not in database.tables(show_deprecated=True):
-            raise KeyError(spec.table)
-    resolved = perf_counter_ns()
+    module_name, attribute = spec.catalog.split(":", 1)
+    catalog = getattr(importlib.import_module(module_name), attribute)
+    database = catalog.db(spec.database)
+    if spec.table not in database.tables(show_deprecated=True):
+        raise KeyError(spec.table)
 
     kwargs: dict[str, Any] = dict(spec.arguments)
     if spec.filters:
@@ -118,27 +108,13 @@ def _retrieve_with_python(spec: ProbeSpec) -> RetrievalResult:
         if spec.object_store_region:
             os.environ["AWS_REGION"] = spec.object_store_region
 
-    with execution_stage(Stage.QUERY, FailureMode.QUERY_EXECUTION_ERROR):
-        lazy_frame = database.table(spec.table, **kwargs)
-        constructed = perf_counter_ns()
-        frame = lazy_frame.collect()
-        rows = [{column: row[column] for column in spec.selected_columns} for row in frame.to_dicts()]
+    lazy_frame = database.table(spec.table, **kwargs)
+    frame = lazy_frame.collect()
+    rows = [{column: row[column] for column in spec.selected_columns} for row in frame.to_dicts()]
     materialized = perf_counter_ns()
     return RetrievalResult(
         rows=rows,
         user_query_latency_ms=_elapsed_ms(started, materialized),
-        phases=(
-            PhaseTiming(name="catalog_import", duration_ms=_elapsed_ms(started, imported)),
-            PhaseTiming(name="table_resolution", duration_ms=_elapsed_ms(imported, resolved)),
-            PhaseTiming(
-                name="query_construction_and_eager_access",
-                duration_ms=_elapsed_ms(resolved, constructed),
-            ),
-            PhaseTiming(
-                name="remaining_materialization",
-                duration_ms=_elapsed_ms(constructed, materialized),
-            ),
-        ),
     )
 
 
@@ -190,26 +166,17 @@ def _normalize_json_rows(decoded: object, spec: ProbeSpec) -> list[dict[str, Any
 def _retrieve_with_roapi(spec: ProbeSpec) -> RetrievalResult:
     started = perf_counter_ns()
     sql = _build_sql(spec)
-    setup = perf_counter_ns()
-    with execution_stage(Stage.QUERY, FailureMode.HTTP_ERROR):
-        response = httpx.post(
-            f"{os.environ['DOCTOR_ROAPI_URL'].rstrip('/')}/api/sql",
-            content=sql.encode(),
-            headers={"accept": "application/json", "content-type": "text/plain"},
-            timeout=spec.timeout_seconds,
-        )
-        response.raise_for_status()
-    transferred = perf_counter_ns()
-    with execution_stage(Stage.RESPONSE_DECODE, FailureMode.RESPONSE_DECODE_ERROR):
-        decoded = json.loads(response.content)
-        rows = _normalize_json_rows(decoded, spec)
+    response = httpx.post(
+        f"{os.environ['DOCTOR_ROAPI_URL'].rstrip('/')}/api/sql",
+        content=sql.encode(),
+        headers={"accept": "application/json", "content-type": "text/plain"},
+        timeout=spec.timeout_seconds,
+    )
+    response.raise_for_status()
+    decoded = json.loads(response.content)
+    rows = _normalize_json_rows(decoded, spec)
     materialized = perf_counter_ns()
     return RetrievalResult(
         rows=rows,
         user_query_latency_ms=_elapsed_ms(started, materialized),
-        phases=(
-            PhaseTiming(name="request_setup", duration_ms=_elapsed_ms(started, setup)),
-            PhaseTiming(name="connect_server_transfer", duration_ms=_elapsed_ms(setup, transferred)),
-            PhaseTiming(name="response_decode", duration_ms=_elapsed_ms(transferred, materialized)),
-        ),
     )

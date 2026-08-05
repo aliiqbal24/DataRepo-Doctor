@@ -33,7 +33,7 @@ def test_real_access_path_materializes_and_validates_complete_result(spec):
         assert outcome.result_rows == ()
 
 
-def test_wrong_contracts_have_precise_failure_modes():
+def test_wrong_contracts_are_validation_errors():
     executor = ProcessProbeExecutor()
     fixture = LOCAL_PROBES[0]
     wrong_type = fixture.expected_schema[0].model_copy(update={"type": "string"})
@@ -42,9 +42,9 @@ def test_wrong_contracts_have_precise_failure_modes():
     )
     count = fixture.model_copy(update={"expected_row_count": 999})
     fingerprint = fixture.model_copy(update={"expected_sha256": "f" * 64})
-    assert executor.run(schema).failure_mode == FailureMode.SCHEMA_MISMATCH
-    assert executor.run(count).failure_mode == FailureMode.ROW_COUNT_MISMATCH
-    assert executor.run(fingerprint).failure_mode == FailureMode.RESULT_FINGERPRINT_MISMATCH
+    assert executor.run(schema).failure_mode == FailureMode.VALIDATION_ERROR
+    assert executor.run(count).failure_mode == FailureMode.VALIDATION_ERROR
+    assert executor.run(fingerprint).failure_mode == FailureMode.VALIDATION_ERROR
 
 
 def test_stopped_roapi_is_connection_error(monkeypatch):
@@ -61,17 +61,13 @@ def test_invalid_object_credentials_are_unhealthy(monkeypatch):
     monkeypatch.setenv("DOCTOR_S3_SECRET_KEY", "invalid")
     outcome = ProcessProbeExecutor().run(LOCAL_PROBES[0])
     assert outcome.health == Health.UNHEALTHY
-    assert outcome.failure_mode in {
-        FailureMode.AUTHENTICATION_ERROR,
-        FailureMode.AUTHORIZATION_ERROR,
-        FailureMode.QUERY_EXECUTION_ERROR,
-    }
+    assert outcome.failure_mode == FailureMode.QUERY_ERROR
 
 
 def test_invalid_object_path_has_truthful_mode(monkeypatch):
     monkeypatch.setenv("DOCTOR_S3_BUCKET", "datarepo-demo-missing")
     outcome = ProcessProbeExecutor().run(LOCAL_PROBES[0])
-    assert outcome.failure_mode in {FailureMode.SOURCE_NOT_FOUND, FailureMode.QUERY_EXECUTION_ERROR}
+    assert outcome.failure_mode == FailureMode.QUERY_ERROR
 
 
 def _fault_spec(table: str, timeout: float = 3) -> ProbeSpec:
@@ -109,7 +105,7 @@ def _fault_spec(table: str, timeout: float = 3) -> ProbeSpec:
 async def test_timeout_or_crash_does_not_strand_next_queued_check(tmp_path, fault, mode, timeout):
     bad = _fault_spec(fault, timeout=timeout)
     good = _fault_spec("succeeding")
-    repo = DoctorRepository(f"sqlite:///{tmp_path / 'fault.db'}")
+    repo = DoctorRepository(str(tmp_path / "fault.db"))
     repo.initialize((bad, good), datetime.now(UTC))
     queue = ProbeQueue((bad, good), repo)
     queue.start()

@@ -68,7 +68,7 @@ def create_app(
     queue: ProbeQueue | None = None,
 ) -> FastAPI:
     config = settings or Settings()
-    repo = repository or DoctorRepository(config.database_url)
+    repo = repository or DoctorRepository(config.database_path)
     probe_queue = queue or ProbeQueue(PROBES, repo)
     scheduler = RecurringScheduler(PROBES, repo, probe_queue)
 

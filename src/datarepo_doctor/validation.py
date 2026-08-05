@@ -17,25 +17,23 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from datarepo_doctor.models import FailureMode, ProbeSpec, SchemaField
+from datarepo_doctor.models import ProbeSpec, SchemaField
 
 
 class ProbeError(Exception):
-    def __init__(self, mode: FailureMode, safe_summary: str) -> None:
+    def __init__(self, safe_summary: str) -> None:
         super().__init__(safe_summary)
-        self.mode = mode
         self.safe_summary = safe_summary
 
 
 class SchemaMismatch(ProbeError):
     def __init__(self) -> None:
-        super().__init__(FailureMode.SCHEMA_MISMATCH, "Result schema did not match the contract.")
+        super().__init__("Result schema did not match the contract.")
 
 
 class RowCountMismatch(ProbeError):
     def __init__(self, expected: int, actual: int) -> None:
         super().__init__(
-            FailureMode.ROW_COUNT_MISMATCH,
             f"Expected {expected} rows but materialized {actual} rows.",
         )
 
@@ -43,7 +41,6 @@ class RowCountMismatch(ProbeError):
 class FingerprintMismatch(ProbeError):
     def __init__(self) -> None:
         super().__init__(
-            FailureMode.RESULT_FINGERPRINT_MISMATCH,
             "Result fingerprint did not match the bounded result contract.",
         )
 
