@@ -17,7 +17,6 @@ def healthy_outcome(spec: ProbeSpec, latency: float = 10) -> ProbeOutcome:
         health=Health.HEALTHY,
         checked_at=datetime.now(UTC),
         user_query_latency_ms=latency,
-        total_probe_duration_ms=latency + 1,
         spec_version=spec.spec_version,
         spec_hash=spec.spec_hash,
         app_version="test",

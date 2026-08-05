@@ -90,20 +90,12 @@ function outcomeDetail(check) {
   if (outcome.health === "healthy") {
     const metric = node("div", "hero-metric");
     metric.append(node("strong", "", outcome.user_query_latency_ms.toFixed(1)), node("span", "", "ms user query latency"));
-    const phases = node("div", "phases");
-    for (const phase of outcome.phase_timings) {
-      const row = node("div");
-      row.append(node("span", "", label(phase.name)), node("strong", "", `${phase.duration_ms.toFixed(1)} ms`));
-      phases.append(row);
-    }
-    section.append(metric, phases, node("p", "total", `Total probe duration ${outcome.total_probe_duration_ms.toFixed(1)} ms`));
+    section.append(metric);
   } else {
     const failure = node("div", "failure-box");
-    const stage = node("div");
-    stage.append(node("span", "", "Stage"), node("strong", "", label(outcome.failure_stage || "unknown")));
     const mode = node("div");
     mode.append(node("span", "", "Mode"), node("strong", "", label(outcome.failure_mode || "unknown")));
-    failure.append(stage, mode, node("p", "", outcome.failure_summary || "The check failed."));
+    failure.append(mode, node("p", "", outcome.failure_summary || "The check failed."));
     if (outcome.failure_detail) failure.append(node("code", "failure-detail", outcome.failure_detail));
     section.append(failure);
   }

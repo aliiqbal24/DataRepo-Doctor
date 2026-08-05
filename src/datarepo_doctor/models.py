@@ -26,34 +26,12 @@ class Health(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
-class Stage(StrEnum):
-    CONFIG = "config"
-    CATALOG_IMPORT = "catalog_import"
-    TABLE_RESOLUTION = "table_resolution"
-    QUERY = "query"
-    RESPONSE_DECODE = "response_decode"
-    VALIDATION = "validation"
-    WORKER = "worker"
-
-
 class FailureMode(StrEnum):
-    INVALID_PROBE_CONFIG = "invalid_probe_config"
-    CATALOG_IMPORT_ERROR = "catalog_import_error"
-    TABLE_NOT_FOUND = "table_not_found"
-    AUTHENTICATION_ERROR = "authentication_error"
-    AUTHORIZATION_ERROR = "authorization_error"
-    DNS_ERROR = "dns_error"
     CONNECTION_ERROR = "connection_error"
-    SOURCE_NOT_FOUND = "source_not_found"
-    HTTP_ERROR = "http_error"
-    QUERY_EXECUTION_ERROR = "query_execution_error"
-    RESPONSE_DECODE_ERROR = "response_decode_error"
-    SCHEMA_MISMATCH = "schema_mismatch"
-    ROW_COUNT_MISMATCH = "row_count_mismatch"
-    RESULT_FINGERPRINT_MISMATCH = "result_fingerprint_mismatch"
+    QUERY_ERROR = "query_error"
+    VALIDATION_ERROR = "validation_error"
     TIMEOUT = "timeout"
     WORKER_CRASH = "worker_crash"
-    UNKNOWN = "unknown"
 
 
 class FilterClause(BaseModel):
@@ -144,11 +122,6 @@ class ProbeSpec(BaseModel):
         return hashlib.sha256(encoded).hexdigest()
 
 
-class PhaseTiming(BaseModel):
-    name: str
-    duration_ms: float = Field(ge=0)
-
-
 class ProbeOutcome(BaseModel):
     """The only probe data allowed to cross the child-process boundary."""
 
@@ -158,10 +131,7 @@ class ProbeOutcome(BaseModel):
     health: Health
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     user_query_latency_ms: float | None = None
-    phase_timings: tuple[PhaseTiming, ...] = ()
     result_rows: tuple[dict[str, Any], ...] = ()
-    total_probe_duration_ms: float = Field(ge=0)
-    failure_stage: Stage | None = None
     failure_mode: FailureMode | None = None
     failure_summary: str | None = None
     failure_detail: str | None = Field(default=None, max_length=300)
@@ -174,7 +144,7 @@ class ProbeOutcome(BaseModel):
 
     @model_validator(mode="after")
     def enforce_binary_contract(self) -> ProbeOutcome:
-        failure_values = (self.failure_stage, self.failure_mode, self.failure_summary, self.failure_detail)
+        failure_values = (self.failure_mode, self.failure_summary, self.failure_detail)
         if self.health == Health.HEALTHY:
             if self.user_query_latency_ms is None:
                 raise ValueError("healthy outcomes require query latency")
@@ -185,6 +155,6 @@ class ProbeOutcome(BaseModel):
                 raise ValueError("unhealthy outcomes must not expose query latency")
             if self.result_rows:
                 raise ValueError("unhealthy outcomes cannot contain result rows")
-            if self.failure_stage is None or self.failure_mode is None:
-                raise ValueError("unhealthy outcomes require stage and failure mode")
+            if self.failure_mode is None:
+                raise ValueError("unhealthy outcomes require a failure mode")
         return self

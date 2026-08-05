@@ -9,9 +9,9 @@ from datarepo_doctor.storage import DoctorRepository
 
 
 def _client(tmp_path):
-    repository = DoctorRepository(f"sqlite:///{tmp_path / 'app.db'}")
+    repository = DoctorRepository(str(tmp_path / "app.db"))
     app = create_app(
-        settings=Settings(database_url=str(repository.engine.url), schedules_enabled=False),
+        settings=Settings(database_path=repository.database_path, schedules_enabled=False),
         repository=repository,
     )
     return TestClient(app), repository
@@ -60,7 +60,6 @@ def test_unhealthy_api_outcome_has_safe_detail_and_no_latency(tmp_path):
         PROBES[0],
         FailureMode.TIMEOUT,
         "The probe reached its safety timeout.",
-        500,
     )
     with client:
         repository.save_outcome(outcome)

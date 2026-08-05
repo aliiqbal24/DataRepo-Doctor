@@ -124,18 +124,15 @@ The browser polls `/api/checks` every two seconds. There are no WebSockets and n
 
 ## Failures and safe diagnostics
 
-The dashboard shows the failure stage, stable mode, safe summary, and an optional scrubbed exception detail. URLs, DSNs, credentials, secret assignments, returned values inside errors, and full tracebacks are not exposed. When an unstructured third-party message cannot be retained safely, only its exception class is shown. Successful public demo checks separately show their explicitly opted-in bounded result rows.
+The dashboard shows one of five stable failure modes, a safe summary, and an optional scrubbed exception detail. URLs, DSNs, credentials, secret assignments, returned values inside errors, and full tracebacks are not exposed. When an unstructured third-party message cannot be retained safely, only its exception class is shown. Successful public demo checks separately show their explicitly opted-in bounded result rows.
 
 | Mode | Meaning |
 |---|---|
-| `catalog_import_error` / `table_not_found` | DataRepo could not import or resolve the configured catalog object |
-| `authentication_error` / `authorization_error` | The representative identity was rejected or denied |
-| `dns_error` / `connection_error` | A dependency could not be resolved or reached |
-| `source_not_found` / `http_error` | The bounded source or HTTP request failed |
-| `query_execution_error` / `response_decode_error` | Retrieval or complete HTTP decoding failed |
-| `schema_mismatch` / `row_count_mismatch` / `result_fingerprint_mismatch` | The complete result violated its contract |
-| `timeout` / `worker_crash` | The child exceeded its safety boundary or exited without an outcome |
-| `unknown` | No more truthful typed classification was available |
+| `connection_error` | A dependency could not be reached or timed out before returning a response |
+| `query_error` | Catalog resolution, authentication, query execution, or response decoding failed |
+| `validation_error` | Schema, exact row count, or result fingerprint did not match; the summary identifies which validation failed |
+| `timeout` | The parent killed a probe at its hard safety boundary |
+| `worker_crash` | The child exited without returning an outcome |
 
 Faults are injected only in tests. See [GUIDE.md](GUIDE.md) for commands and detailed walkthroughs.
 

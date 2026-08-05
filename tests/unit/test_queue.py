@@ -29,7 +29,7 @@ class FirstCrashExecutor(RecordingExecutor):
 
 @pytest.mark.asyncio
 async def test_queue_deduplicates_and_executes_globally_sequential(tmp_path):
-    repo = DoctorRepository(f"sqlite:///{tmp_path / 'q.db'}")
+    repo = DoctorRepository(str(tmp_path / "q.db"))
     repo.initialize(PROBES)
     executor = RecordingExecutor()
     queue = ProbeQueue(PROBES, repo, executor)
@@ -51,7 +51,7 @@ async def test_queue_deduplicates_and_executes_globally_sequential(tmp_path):
 
 @pytest.mark.asyncio
 async def test_executor_crash_does_not_strand_next_job(tmp_path):
-    repo = DoctorRepository(f"sqlite:///{tmp_path / 'q.db'}")
+    repo = DoctorRepository(str(tmp_path / "q.db"))
     repo.initialize(PROBES)
     executor = FirstCrashExecutor()
     queue = ProbeQueue(PROBES, repo, executor)
