@@ -14,7 +14,7 @@ A check is **healthy** only when its real query completes and the complete mater
 2. exact row-count validation; and
 3. deterministic SHA-256 fingerprint validation.
 
-Successful latency measures the supported user access path through complete materialization or HTTP decoding. Validation and persistence are measured separately. Latency never changes health. Failed and timed-out checks have no query-latency value.
+Successful latency starts immediately before the query call and stops when its complete result is received: `database.table(...).collect()` for Python or `httpx.post(...)` for ROAPI. Catalog setup, response conversion/decoding, validation, and persistence are excluded. Latency never changes health. Failed and timed-out checks have no query-latency value.
 
 This proves one bounded query works from this local environment with the `doctor_reader` profile. It does not prove every query works, every user has access, the data is fresh, or the data is scientifically valid.
 
@@ -134,7 +134,7 @@ The dashboard shows one of five stable failure modes, a safe summary, and an opt
 | `timeout` | The parent killed a probe at its hard safety boundary |
 | `worker_crash` | The child exited without returning an outcome |
 
-Faults are injected only in tests. See [GUIDE.md](GUIDE.md) for commands and detailed walkthroughs.
+Faults are injected only in tests. The integration suite contains the real-path and recovery scenarios.
 
 ## Adding a check
 
@@ -152,4 +152,4 @@ Never compute the expected fingerprint during a normal health run; that would ma
 
 The project depends on the public `data-repository==0.0.2` package and does not fork or modify DataRepo. DataRepo 0.0.2 pins Polars 1.12; the Docker image replaces that wheel with API-compatible `polars-lts-cpu==1.12.0` for CPU portability. Application behavior and DataRepo interfaces are unchanged.
 
-For a ground-up explanation of every component and the exact code path, read [GUIDE.md](GUIDE.md).
+For interview-focused architecture and tradeoff preparation, read [INTERVIEW_PREP.md](INTERVIEW_PREP.md).

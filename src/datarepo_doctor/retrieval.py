@@ -84,7 +84,6 @@ def _retrieve_with_python(spec: ProbeSpec) -> RetrievalResult:
     import boto3
     from datarepo.core import Filter
 
-    started = perf_counter_ns()
     module_name, attribute = spec.catalog.split(":", 1)
     catalog = getattr(importlib.import_module(module_name), attribute)
     database = catalog.db(spec.database)
@@ -108,13 +107,14 @@ def _retrieve_with_python(spec: ProbeSpec) -> RetrievalResult:
         if spec.object_store_region:
             os.environ["AWS_REGION"] = spec.object_store_region
 
+    started = perf_counter_ns()
     lazy_frame = database.table(spec.table, **kwargs)
     frame = lazy_frame.collect()
+    received = perf_counter_ns()
     rows = [{column: row[column] for column in spec.selected_columns} for row in frame.to_dicts()]
-    materialized = perf_counter_ns()
     return RetrievalResult(
         rows=rows,
-        user_query_latency_ms=_elapsed_ms(started, materialized),
+        user_query_latency_ms=_elapsed_ms(started, received),
     )
 
 
@@ -164,19 +164,19 @@ def _normalize_json_rows(decoded: object, spec: ProbeSpec) -> list[dict[str, Any
 
 
 def _retrieve_with_roapi(spec: ProbeSpec) -> RetrievalResult:
-    started = perf_counter_ns()
     sql = _build_sql(spec)
+    started = perf_counter_ns()
     response = httpx.post(
         f"{os.environ['DOCTOR_ROAPI_URL'].rstrip('/')}/api/sql",
         content=sql.encode(),
         headers={"accept": "application/json", "content-type": "text/plain"},
         timeout=spec.timeout_seconds,
     )
+    received = perf_counter_ns()
     response.raise_for_status()
     decoded = json.loads(response.content)
     rows = _normalize_json_rows(decoded, spec)
-    materialized = perf_counter_ns()
     return RetrievalResult(
         rows=rows,
-        user_query_latency_ms=_elapsed_ms(started, materialized),
+        user_query_latency_ms=_elapsed_ms(started, received),
     )
