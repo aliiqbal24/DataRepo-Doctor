@@ -1,4 +1,4 @@
-from datarepo_doctor.domain.models import (
+from datarepo_doctor.models import (
     AccessMethod,
     FilterClause,
     ObjectStoreProfile,

@@ -1,4 +1,4 @@
-.PHONY: demo down seed test test-integration lint web-test build
+.PHONY: demo down seed test test-integration lint build
 
 demo:
 	docker compose up --build
@@ -18,10 +18,6 @@ test-integration:
 lint:
 	ruff check .
 	mypy src
-	cd web && npm run lint && npm run typecheck
-
-web-test:
-	cd web && npm test -- --run
 
 build:
-	cd web && npm run build
+	docker compose build app

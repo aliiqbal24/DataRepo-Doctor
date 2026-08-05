@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datarepo_doctor.domain.models import (
+from datarepo_doctor.models import (
     AccessMethod,
     FilterClause,
     ObjectStoreProfile,
@@ -70,6 +70,7 @@ PROBES: tuple[ProbeSpec, ...] = (
             "Select four declared columns for five fixed public product identifiers "
             "[redacted]."
         ),
+        display_result_rows=True,
         spec_version="2",
     ),
     ProbeSpec(
@@ -98,6 +99,7 @@ PROBES: tuple[ProbeSpec, ...] = (
         object_store_profile=ObjectStoreProfile.PUBLIC_AWS_UNSIGNED,
         object_store_region="us-west-2",
         query_description="Select five declared columns for five fixed EIA energy codes [redacted].",
+        display_result_rows=True,
         spec_version="2",
     ),
     ProbeSpec(
@@ -127,6 +129,7 @@ PROBES: tuple[ProbeSpec, ...] = (
         phase_offset_minutes=10,
         environment=PUBLIC_ENVIRONMENT,
         query_description="Resolve two fixed archived external RNA accessions [redacted].",
+        display_result_rows=True,
         spec_version="2",
     ),
     ProbeSpec(
@@ -153,6 +156,7 @@ PROBES: tuple[ProbeSpec, ...] = (
         phase_offset_minutes=15,
         environment=PUBLIC_ENVIRONMENT,
         query_description="HTTP SQL selection for five fixed EIA energy codes [redacted].",
+        display_result_rows=True,
         spec_version="2",
     ),
 )

@@ -2,9 +2,9 @@ import time
 
 import pytest
 
-from datarepo_doctor.execution.queue import JobStatus, ProbeQueue
-from datarepo_doctor.persistence.repository import DoctorRepository
-from datarepo_doctor.registry import PROBES
+from datarepo_doctor.checks import PROBES
+from datarepo_doctor.orchestration import JobStatus, ProbeQueue
+from datarepo_doctor.storage import DoctorRepository
 from tests.unit.conftest import healthy_outcome
 
 

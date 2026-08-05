@@ -77,6 +77,8 @@ _SECRET_PATTERN = re.compile(
 
 
 class ProbeSpec(BaseModel):
+    """A complete, bounded, secret-free retrieval and validation contract."""
+
     model_config = ConfigDict(frozen=True)
 
     check_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,63}$")
@@ -107,6 +109,7 @@ class ProbeSpec(BaseModel):
     object_store_profile: ObjectStoreProfile = ObjectStoreProfile.NONE
     object_store_region: str | None = None
     query_description: str
+    display_result_rows: bool = False
     spec_version: str = "1"
 
     @model_validator(mode="after")
@@ -147,6 +150,8 @@ class PhaseTiming(BaseModel):
 
 
 class ProbeOutcome(BaseModel):
+    """The only probe data allowed to cross the child-process boundary."""
+
     model_config = ConfigDict(extra="forbid")
 
     check_id: str
@@ -154,10 +159,12 @@ class ProbeOutcome(BaseModel):
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     user_query_latency_ms: float | None = None
     phase_timings: tuple[PhaseTiming, ...] = ()
+    result_rows: tuple[dict[str, Any], ...] = ()
     total_probe_duration_ms: float = Field(ge=0)
     failure_stage: Stage | None = None
     failure_mode: FailureMode | None = None
     failure_summary: str | None = None
+    failure_detail: str | None = Field(default=None, max_length=300)
     spec_version: str
     spec_hash: str
     app_version: str
@@ -167,14 +174,17 @@ class ProbeOutcome(BaseModel):
 
     @model_validator(mode="after")
     def enforce_binary_contract(self) -> ProbeOutcome:
+        failure_values = (self.failure_stage, self.failure_mode, self.failure_summary, self.failure_detail)
         if self.health == Health.HEALTHY:
             if self.user_query_latency_ms is None:
                 raise ValueError("healthy outcomes require query latency")
-            if any((self.failure_stage, self.failure_mode, self.failure_summary)):
+            if any(failure_values):
                 raise ValueError("healthy outcomes cannot contain failure details")
         else:
             if self.user_query_latency_ms is not None:
                 raise ValueError("unhealthy outcomes must not expose query latency")
+            if self.result_rows:
+                raise ValueError("unhealthy outcomes cannot contain result rows")
             if self.failure_stage is None or self.failure_mode is None:
                 raise ValueError("unhealthy outcomes require stage and failure mode")
         return self

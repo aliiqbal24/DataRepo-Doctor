@@ -3,10 +3,14 @@ import socket
 import httpx
 import pytest
 
-from datarepo_doctor.domain.errors import FingerprintMismatch, SchemaMismatch
-from datarepo_doctor.domain.models import FailureMode, Stage
-from datarepo_doctor.execution.classify import classify_exception
-from datarepo_doctor.execution.context import StageError
+from datarepo_doctor.models import FailureMode, Stage
+from datarepo_doctor.runner import (
+    StageError,
+    classify_exception,
+    safe_exception_detail,
+    sanitize_error_message,
+)
+from datarepo_doctor.validation import FingerprintMismatch, SchemaMismatch
 
 
 @pytest.mark.parametrize(
@@ -31,3 +35,21 @@ def test_http_status_classification():
     stage, mode, summary = classify_exception(StageError(Stage.QUERY, FailureMode.HTTP_ERROR, exc))
     assert (stage, mode) == (Stage.QUERY, FailureMode.AUTHORIZATION_ERROR)
     assert "safe.invalid" not in summary
+
+
+def test_error_detail_scrubs_urls_secrets_literals_and_long_tokens():
+    message = (
+        "request https://internal.example/query?token=hunter2 "
+        "password=unsafe value='returned-row' ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+    safe = sanitize_error_message(message)
+    assert "internal.example" not in safe
+    assert "hunter2" not in safe
+    assert "unsafe" not in safe
+    assert "returned-row" not in safe
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in safe
+
+
+def test_unknown_exception_exposes_type_not_unstructured_message():
+    detail = safe_exception_detail(RuntimeError("password=unsafe returned-row"))
+    assert detail == "RuntimeError"

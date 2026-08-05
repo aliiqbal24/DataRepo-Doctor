@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from datarepo_doctor.domain.models import ProbeSpec
+from datarepo_doctor.models import ProbeSpec
 
 
 @pytest.mark.parametrize(

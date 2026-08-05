@@ -15,8 +15,8 @@ import yaml
 from deltalake import write_deltalake
 from psycopg import sql
 
-from datarepo_doctor.domain.canonical import result_sha256
-from datarepo_doctor.registry.probes import PROBES
+from datarepo_doctor.checks import PROBES
+from datarepo_doctor.validation import result_sha256
 from demo_catalog.fixtures import ORDER_ROWS, PART_ROWS, SUPPLIER_ROWS
 
 
