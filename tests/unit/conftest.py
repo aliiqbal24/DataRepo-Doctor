@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from datarepo_doctor.domain.models import Health, ProbeOutcome, ProbeSpec
-from datarepo_doctor.registry import PROBES
+from datarepo_doctor.checks import PROBES
+from datarepo_doctor.models import Health, ProbeOutcome, ProbeSpec
 
 
 @pytest.fixture

@@ -1,3 +1,5 @@
+"""One FIFO worker plus independently persisted recurring schedules."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,10 +9,9 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
-from datarepo_doctor.domain.models import FailureMode, ProbeOutcome, ProbeSpec
-from datarepo_doctor.persistence.repository import DoctorRepository
-
-from .engine import ProcessProbeExecutor
+from datarepo_doctor.models import FailureMode, ProbeOutcome, ProbeSpec
+from datarepo_doctor.runner import ProcessProbeExecutor
+from datarepo_doctor.storage import DoctorRepository
 
 
 class JobStatus(StrEnum):
@@ -84,7 +85,12 @@ class ProbeQueue:
         while True:
             check_id = await self._queue.get()
             queued = self._states[check_id]
-            self._states[check_id] = JobState(check_id, JobStatus.RUNNING, queued.enqueued_at, queued.source)
+            self._states[check_id] = JobState(
+                check_id,
+                JobStatus.RUNNING,
+                queued.enqueued_at,
+                queued.source,
+            )
             try:
                 try:
                     outcome = await asyncio.to_thread(self._executor.run, self._probes[check_id])
@@ -99,3 +105,41 @@ class ProbeQueue:
             finally:
                 self._states[check_id] = JobState(check_id, JobStatus.IDLE)
                 self._queue.task_done()
+
+
+class RecurringScheduler:
+    def __init__(
+        self,
+        probes: tuple[ProbeSpec, ...],
+        repository: DoctorRepository,
+        queue: ProbeQueue,
+    ) -> None:
+        self._probes = probes
+        self._repository = repository
+        self._queue = queue
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._loop(), name="recurring-scheduler")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
+
+    async def enqueue_due(self, now: datetime | None = None) -> list[str]:
+        timestamp = now or datetime.now(UTC)
+        schedules = self._repository.schedules()
+        for probe in self._probes:
+            schedule = schedules[probe.check_id]
+            if schedule.enabled and schedule.next_run_at <= timestamp:
+                await self._queue.enqueue(probe.check_id, source="scheduled")
+                self._repository.advance_schedule(probe.check_id, timestamp)
+                return [probe.check_id]
+        return []
+
+    async def _loop(self) -> None:
+        while True:
+            await self.enqueue_due()
+            await asyncio.sleep(1)

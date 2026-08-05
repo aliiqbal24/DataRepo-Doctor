@@ -1,7 +1,7 @@
 .git
 .venv
 .tmp_datarepo
+# Legacy local frontend artifacts are not part of the Python image.
 web/node_modules
 web/dist
 *.db
-

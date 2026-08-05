@@ -1,1331 +1,685 @@
-# DataRepo Doctor: The Complete Guide
+# DataRepo Doctor: From Zero to a Complete Mental Model
 
-This guide explains DataRepo Doctor from the ground up. It assumes you are new to the application,
-DataRepo, Python web services, React, databases, object storage, containers, queues, and synthetic
-monitoring. By the end, you should be able to:
+This guide assumes you have never used DataRepo, FastAPI, object storage, PostgreSQL, queues, child processes, or browser APIs. It builds the system one idea at a time and then follows a real check through every layer of code.
 
-- explain the problem the application solves and the limits of its guarantee;
-- trace a click in the browser all the way to a real remote data source and back;
-- identify which code belongs to DataRepo and which code belongs to DataRepo Doctor;
-- explain every major technology and why it is present;
-- understand the four retrieval paths, validation contract, timing, failure taxonomy, queue,
-  scheduler, persistence, API, dashboard, Docker deployment, and test strategy;
-- run and troubleshoot the project; and
-- confidently describe the architecture to another engineer or scientist.
+By the end, you should be able to explain what the application proves, where the data physically lives, how DataRepo retrieves it, why the queue and child process exist, what latency means, and why a green result is trustworthy.
 
-The shorter operational instructions are in [README.md](README.md). This file is the learning guide.
+## 1. The problem in plain English
 
-## Table of contents
+A scientist does not care whether a storage server responds to a ping. They care whether their supported data-access code can retrieve the result they need.
 
-1. [Start with the problem](#1-start-with-the-problem)
-2. [Foundational concepts and vocabulary](#2-foundational-concepts-and-vocabulary)
-3. [The complete system at a glance](#3-the-complete-system-at-a-glance)
-4. [What is DataRepo, and what is DataRepo Doctor?](#4-what-is-datarepo-and-what-is-datarepo-doctor)
-5. [The real data sources and four checks](#5-the-real-data-sources-and-four-checks)
-6. [How the DataRepo catalog is built](#6-how-the-datarepo-catalog-is-built)
-7. [How a check is specified](#7-how-a-check-is-specified)
-8. [End-to-end walkthrough: clicking Check now](#8-end-to-end-walkthrough-clicking-check-now)
-9. [The four retrieval paths in detail](#9-the-four-retrieval-paths-in-detail)
-10. [Complete-result validation and fingerprinting](#10-complete-result-validation-and-fingerprinting)
-11. [Health, latency, phases, and failures](#11-health-latency-phases-and-failures)
-12. [Subprocess isolation and timeouts](#12-subprocess-isolation-and-timeouts)
-13. [The FIFO queue and recurring scheduler](#13-the-fifo-queue-and-recurring-scheduler)
-14. [SQLite persistence](#14-sqlite-persistence)
-15. [The FastAPI backend](#15-the-fastapi-backend)
-16. [The React dashboard](#16-the-react-dashboard)
-17. [Docker, Compose, and startup order](#17-docker-compose-and-startup-order)
-18. [Security and privacy](#18-security-and-privacy)
-19. [Testing and quality checks](#19-testing-and-quality-checks)
-20. [Run the application from zero](#20-run-the-application-from-zero)
-21. [How to add a new check](#21-how-to-add-a-new-check)
-22. [Troubleshooting](#22-troubleshooting)
-23. [Design decisions, limitations, and non-goals](#23-design-decisions-limitations-and-non-goals)
-24. [How to explain the project to someone else](#24-how-to-explain-the-project-to-someone-else)
-25. [Reference appendices](#25-reference-appendices)
+DataRepo Doctor repeatedly asks one narrow operational question:
 
-## 1. Start with the problem
+> If `doctor_reader` uses this supported DataRepo access path from this environment right now, can it retrieve the entire bounded expected result, and how long does that successful query take?
 
-Imagine a scientist has been told that a useful table exists in a data catalog. Seeing the table's
-name in documentation does not prove the scientist can retrieve it. Many things can break between
-discovery and actual use:
+Each important word constrains the answer:
 
-- the catalog can fail to import;
-- the table can be renamed or removed;
-- credentials can expire or lose permission;
-- DNS can fail to resolve a service name;
-- a database or HTTP service can be down;
-- an object-storage URI can point to a missing object;
-- a Delta transaction log or Parquet file can fail to decode;
-- a filter can return too few or too many rows;
-- values can change while the schema and row count remain the same; or
-- a query can hang forever.
+- **`doctor_reader`** means one representative read-only identity, not every possible user.
+- **Supported DataRepo access path** means the same catalog/table interface or generated ROAPI endpoint a consumer uses. It does not mean a direct S3 or database ping.
+- **Right now** means the result is synthetic monitoring, not a historical guarantee.
+- **Entire bounded expected result** means a deliberately small query with exact filters, selected columns, row count, schema, and fingerprint.
+- **Successful query time** means latency is reported only after complete materialization or decoding. It is not a health threshold.
 
-A storage ping, an HTTP liveness endpoint, or a `limit(1)` query can succeed while the scientist's
-real retrieval path is broken. DataRepo Doctor therefore asks a stronger and very specific question:
+A healthy result does not prove that all data is fresh, all queries work, all users have permission, or the science is correct. It proves one exact retrieval contract.
 
-> If a scientist uses this supported DataRepo access path right now, can the representative
-> `doctor_reader` profile retrieve the entire bounded expected result, and how long does that
-> successful retrieval take?
+## 2. The minimum vocabulary
 
-There are four important parts in that sentence:
+### Application and process
 
-1. **Supported DataRepo access path** means the monitor uses the same public Python catalog/query
-   interface or generated ROAPI HTTP surface a user would use. It does not secretly bypass DataRepo
-   and read the source directly.
-2. **Right now** means this is an operational check of the current catalog, network, identity, source,
-   decoder, and result—not a static code inspection.
-3. **Entire bounded expected result** means the query is intentionally small and deterministic, but
-   every row in that small slice must be materialized and validated.
-4. **How long** means latency is reported on success. Latency is descriptive; it never changes health.
+An application is the whole DataRepo Doctor system. A process is one running operating-system program. The normal deployment has one FastAPI application process. Each check temporarily creates a separate child process.
 
-### The exact guarantee
+### Frontend and backend
 
-When a check is healthy, the application has proved that one particular bounded query worked:
+The frontend is the HTML page in the browser. It presents state and sends actions. The backend is Python. It owns probes, the queue, scheduler, subprocesses, validation, and persistence.
 
-- from this local deployment;
-- through the named Python SDK or ROAPI access method;
-- using the logical `doctor_reader` profile;
-- against the configured remote source;
-- with the declared columns and filters or arguments; and
-- with the expected schema, exact row count, and exact content fingerprint.
-
-It does **not** prove that every possible query works, every user has the same permission, the source
-is fresh, the data is scientifically correct, or the service will remain healthy after the check.
-
-## 2. Foundational concepts and vocabulary
-
-This section defines the terms used throughout the guide.
-
-### Application, process, and service
-
-An **application** is the whole product. A **process** is one running operating-system program. A
-**service** is a process or group of processes reached through a stable interface, usually over a
-network. DataRepo Doctor is one application composed locally from an app service and a ROAPI service,
-plus external data services.
+The frontend never queries S3, PostgreSQL, DataRepo, or ROAPI directly. It asks the backend to run a named check.
 
 ### API and HTTP
 
-An **API** is a defined way for software to communicate. **HTTP** is the request/response protocol used
-by browsers and web services. For example, the dashboard sends `POST /api/checks/{id}/run` to request
-a check and polls `GET /api/checks` to read current state.
+An API is a defined way for programs to communicate. The browser calls FastAPI over HTTP:
+
+- `GET` reads state.
+- `POST` requests a new action.
+- `PATCH` changes part of an existing configuration.
+
+ROAPI is a separate read-only HTTP API that exposes a catalog-backed table. One monitor check calls it to prove that retrieval surface works.
 
 ### Catalog, database, table, row, column, and schema
 
-- A **catalog** organizes data that users are allowed to discover and query.
-- A **database** is a named grouping inside the catalog.
-- A **table** is data arranged into rows and columns.
-- A **row** is one record.
-- A **column** is one named field present across records.
-- A **schema** declares the ordered column names, types, and nullability.
+A catalog organizes named databases. A database contains named tables. A table returns rows. Each row has named columns. A schema says which columns and types should exist.
 
-DataRepo's catalog lets a caller ask for a logical table without implementing the physical retrieval
-details at every call site.
+DataRepo gives Python code one consistent catalog/database/table model even when the physical source is Delta Lake, Parquet, or a Python function backed by PostgreSQL.
 
 ### SDK
 
-An **SDK**, or software development kit, is a library developers call from code. The DataRepo Python
-SDK exposes objects such as `Catalog`, `ModuleDatabase`, `DeltalakeTable`, `ParquetTable`, `Filter`,
-and the `@table` decorator.
+SDK means software development kit. Here it refers to the public DataRepo Python package. A normal query resolves a catalog database and table, applies filters/arguments and selected columns, then materializes the result.
 
-### Object storage and S3
+### S3, Parquet, and Delta Lake
 
-**Object storage** stores blobs under bucket/key names rather than rows in a relational database.
-Amazon S3 is a common object-storage protocol. An address such as
-`s3://pudl.catalyst.coop/v2024.11.0/file.parquet` identifies a bucket and object key. MinIO is a local,
-S3-compatible service used only by this project's integration tests.
+S3 is object storage: named buckets contain objects addressed by paths. Parquet is a columnar data-file format. Delta Lake adds a transaction log around data files so readers can resolve a consistent table version.
 
-### Parquet and Delta Lake
+The normal checks read public objects stored in Amazon S3. The integration tests use MinIO, an S3-compatible service, to test credentials and controlled failures.
 
-**Parquet** is a column-oriented file format designed for analytical data. It stores typed columns
-efficiently and allows readers to select only needed columns.
+### PostgreSQL
 
-**Delta Lake** stores Parquet data plus a transaction log. The log describes which data files make up
-the current table version. Reading a Delta table therefore involves resolving the transaction log as
-well as reading its data files.
+PostgreSQL is a relational database server queried with SQL. The RNAcentral check uses a DataRepo custom Python function table. DataRepo invokes that function, and the function issues a bounded read-only PostgreSQL query.
 
-### PostgreSQL and SQL
+### Lazy and materialized data
 
-**PostgreSQL** is a relational database server. **SQL** is a language for selecting and transforming
-relational data. The RNAcentral check executes a parameterized, read-only SQL query inside a DataRepo
-function table.
-
-### DataFrame and lazy execution
-
-A **DataFrame** is an in-memory tabular object. A **lazy frame** describes a computation that has not
-necessarily run yet. DataRepo returns an `NlkDataFrame`/Polars lazy result. Calling `.collect()` forces
-the complete bounded result to execute and materialize. That call is essential: constructing a query
-without collecting it would not prove the data can actually be retrieved.
+DataRepo returns a lazy frame for many tables. A lazy query is only a plan. Calling `.collect()` executes it and returns the complete materialized result. DataRepo Doctor does not stop after constructing the plan because that would not prove the data can be retrieved.
 
 ### Queue and FIFO
 
-A **queue** holds work waiting to run. **FIFO** means first in, first out. Manual and scheduled checks
-enter the same queue. Only one check runs globally at a time, preventing local resource contention and
-making behavior predictable.
+A queue is an ordered waiting line. FIFO means first in, first out. Manual and scheduled jobs enter the same queue. Exactly one job runs at a time.
 
 ### Process isolation
 
-Each probe runs in a fresh child process. If a native library crashes or a query hangs, the parent app
-can terminate that child without losing the scheduler, API, queue, or later jobs.
+Isolation means each third-party retrieval runs in a new child process. The parent can kill a hanging child without killing FastAPI or permanently blocking the queue.
 
 ### Canonicalization and fingerprint
 
-Different runtimes can represent the same value in different ways. **Canonicalization** converts every
-validated result into one deterministic byte representation. A **SHA-256 fingerprint** is a 64-character
-digest of those bytes. The monitor compares the actual digest with the expected digest to detect any
-content change without saving or displaying the retrieved values.
+Canonicalization converts a result into one deterministic byte representation. SHA-256 hashes those bytes into a fixed-size fingerprint. If a value, type, row, or column changes, the fingerprint changes.
 
-### Container, image, and Docker Compose
-
-- A Docker **image** is a packaged filesystem and startup definition.
-- A **container** is a running instance of an image.
-- **Docker Compose** defines several cooperating containers, their environment variables, networks,
-  ports, volumes, health checks, and startup dependencies.
-
-## 3. The complete system at a glance
-
-The simplest mental model is:
-
-```text
-Browser dashboard
-    → FastAPI
-    → one FIFO queue
-    → one fresh probe subprocess
-    → DataRepo Python SDK or ROAPI HTTP
-    → real remote source
-    → complete bounded result
-    → schema/count/fingerprint validation
-    → safe outcome only
-    → SQLite
-    → dashboard polling
-```
-
-The fuller architecture is:
+## 3. System overview
 
 ```mermaid
-flowchart LR
-    Browser[React dashboard] -->|poll, run, schedule| API[FastAPI backend]
-    Scheduler[Recurring scheduler] --> Queue[FIFO queue]
+flowchart TD
+    Person[Person in browser] --> UI[HTML / CSS / vanilla JavaScript]
+    UI -->|GET checks| API[FastAPI]
+    UI -->|POST Check Now| API
+    UI -->|PATCH schedule| API
+    Scheduler[Recurring scheduler] --> Queue[Single FIFO queue]
     API --> Queue
-    Queue -->|one job at a time| Parent[Parent executor]
-    Parent -->|spawn + ProbeSpec JSON| Child[Fresh child process]
-    Child --> SDK[DataRepo Python adapter]
-    Child --> HTTP[ROAPI HTTP adapter]
-    SDK --> Catalog[DataRepo catalog]
-    Catalog --> Delta[Public AWS Delta table]
-    Catalog --> Parquet[Public PUDL Parquet file]
-    Catalog --> Function[DataRepo function table]
-    Function --> RNA[(RNAcentral PostgreSQL)]
-    HTTP --> ROAPI[Generated read-only ROAPI]
-    ROAPI --> Parquet
-    Child --> Validate[Schema + exact count + SHA-256]
-    Validate -->|ProbeOutcome JSON only| Parent
-    Parent --> SQLite[(SQLite latest outcome + schedule)]
-    SQLite --> API
+    Queue --> Runner[Parent process runner]
+    Runner -->|spawn| Child[One isolated child]
+    Child --> Retrieval{Access method}
+    Retrieval -->|Python SDK| DataRepo[DataRepo catalog/table query]
+    Retrieval -->|HTTP| ROAPI[ROAPI SQL endpoint]
+    DataRepo --> S3[Public S3 Delta/Parquet]
+    DataRepo --> PG[Public PostgreSQL]
+    ROAPI --> S3
+    Child --> Validation[Schema + row count + SHA-256]
+    Child -->|safe outcome only| Runner
+    Runner --> SQLite[(SQLite latest result)]
+    API --> SQLite
 ```
 
-### The major boundaries
+There are three important trust boundaries:
 
-| Boundary | Responsibility |
+1. The browser receives operational metadata plus rows only for probes explicitly approved for result display; it never receives credentials.
+2. The child receives one serialized `ProbeSpec` and environment-based credentials.
+3. The parent receives one serialized `ProbeOutcome`, never a DataFrame, raw HTTP body, or traceback. That outcome may contain an approved copy of a public bounded result.
+
+## 4. Repository map
+
+The simplified Python package has a short reading order:
+
+| File | Responsibility |
 |---|---|
-| `domain/` | Pure typed contracts, health rules, errors, canonicalization, hashing |
-| `registry/` | The four immutable production check definitions |
-| `demo_catalog/` | DataRepo catalog and physical table/function definitions |
-| `adapters/` | Execute either the Python DataRepo or ROAPI HTTP retrieval path |
-| `execution/` | Stages, failure classification, subprocess lifecycle, FIFO worker |
-| `scheduling/` | Decide when recurring checks become due |
-| `persistence/` | Store schedules and one latest outcome per check in SQLite |
-| `api/` | Safe HTTP endpoints and production frontend serving |
-| `web/` | React dashboard and TypeScript browser models |
-| `infra/` and Compose | Package and connect local services |
-| `tests/` | Unit contracts, real integrations, and controlled faults |
+| `models.py` | Typed probe and outcome contracts |
+| `checks.py` | The four real check definitions |
+| `orchestration.py` | FIFO queue and recurring scheduler |
+| `runner.py` | Child process, timeout, stages, errors, and timing |
+| `retrieval.py` | DataRepo Python and ROAPI retrieval code |
+| `validation.py` | Canonical result validation and hashing |
+| `storage.py` | Two SQLite tables and repository operations |
+| `app.py` | FastAPI lifecycle, API routes, and static files |
+| `static/` | One HTML page, stylesheet, and browser script |
+| `seed.py` | Generates/validates ROAPI config and controlled test fixtures |
 
-## 4. What is DataRepo, and what is DataRepo Doctor?
+Outside the package:
 
-This distinction is central.
+- `demo_catalog/` defines the actual DataRepo catalog.
+- `tests/` contains unit, real integration, and fault tests.
+- `docker-compose.yml` wires services together.
+- `Dockerfile` builds one Python image; Node is not involved.
 
-### DataRepo's responsibility
+## 5. DataRepo versus DataRepo Doctor
 
-DataRepo is the data-access abstraction. It provides:
+DataRepo was made to let consumers retrieve data through a consistent catalog abstraction instead of learning every physical source's API.
 
-- a `Catalog` containing named databases;
-- `ModuleDatabase`, which exposes tables defined in a Python module;
-- native `DeltalakeTable` and `ParquetTable` definitions;
-- `Filter` objects and column projection;
-- a `database.table(name, **arguments)` query interface;
-- an `@table` decorator for custom Python-backed tables; and
-- catalog export into ROAPI table configuration.
+DataRepo's job is to:
 
-A scientist can ask the catalog for a logical table without reimplementing source-specific mechanics
-in every notebook.
+- represent native Parquet and Delta tables;
+- expose Python function tables;
+- apply filters and selected columns;
+- return lazy frames that can be materialized; and
+- provide catalog metadata that can generate ROAPI configuration.
 
-### DataRepo Doctor's responsibility
+DataRepo Doctor's job is to:
 
-DataRepo Doctor is the operational monitor around those access paths. It provides:
+- decide which representative queries matter;
+- schedule and queue them;
+- isolate each execution;
+- measure the supported retrieval path;
+- validate the full bounded result;
+- classify safe failures;
+- retain one latest outcome; and
+- present it in a dashboard.
 
-- a fixed registry of bounded representative queries;
-- schedules and Check now actions;
-- global sequential execution;
-- process isolation and hard timeouts;
-- identical result validation for Python and HTTP retrieval;
-- safe failure classification;
-- latest-only persistence; and
-- a dashboard for health, successful latency, schedules, and details.
+The monitor does not reimplement DataRepo. It calls the public package.
 
-DataRepo Doctor does not replace DataRepo. The critical Python call remains:
+## 6. The literal data sources
+
+### Check 1: native Delta in public Amazon S3
+
+- Physical source: `s3://aws-bigdata-blog/artifacts/delta-lake-crawler/sample_delta_table`
+- Owner: Amazon Web Services
+- Data format: Delta Lake
+- Access: DataRepo Python SDK
+- Bounded result: five declared product IDs and four selected columns
+
+The catalog declares a native Delta table. DataRepo resolves the Delta transaction log and underlying objects, applies the bounded filter, and returns a lazy frame. The child calls `.collect()`.
+
+### Check 2: native Parquet in public Amazon S3
+
+- Physical source: `s3://pudl.catalyst.coop/v2024.11.0/core_eia__codes_energy_sources.parquet`
+- Owner: Catalyst Cooperative
+- Data format: Parquet
+- Access: DataRepo Python SDK
+- Bounded result: five fixed energy codes and five selected columns
+
+DataRepo's native Parquet support reads the real public object. There is no local fallback file in the normal catalog.
+
+### Check 3: RNAcentral public PostgreSQL
+
+- Physical source: `hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs`
+- Owner: RNAcentral / EMBL-EBI
+- Access: DataRepo Python SDK to a custom `@table` function
+- Bounded result: two fixed archived RNA accessions and three selected columns
+
+The catalog function takes two bounded arguments. Inside the function, `psycopg` connects with the read-only public reader and issues the SQL query. The monitor still reaches it through `database.table(...)`, so it proves the DataRepo function-table path rather than bypassing DataRepo.
+
+### Check 4: ROAPI over HTTP
+
+- Physical source: the same versioned PUDL Parquet object
+- Access: HTTP POST to ROAPI's SQL endpoint
+- Bounded result: the same five codes and five columns as check 2
+
+The seeding/configuration command derives the table configuration from the DataRepo catalog metadata. The monitor builds bounded SQL from the typed probe and decodes the complete JSON response.
+
+### Controlled test-only services
+
+MinIO and local PostgreSQL run only under Compose's `test` profile. They let tests change paths, credentials, values, and service availability without damaging a public service. A healthy default dashboard entry is never a mock.
+
+## 7. The demo catalog
+
+Open `demo_catalog/catalog.py`. It creates a DataRepo `Catalog` containing a `public_science` database. That database exposes:
+
+- a native `DeltaTable` for AWS products;
+- a native `ParquetTable` for PUDL energy codes; and
+- the `rna_xrefs` Python function table.
+
+The important idea is that source-specific configuration is catalog-side. Retrieval-side code uses the common DataRepo interface.
+
+A Python check eventually performs the equivalent of:
 
 ```python
+module_name, attribute = spec.catalog.split(":", 1)
+catalog = getattr(importlib.import_module(module_name), attribute)
 database = catalog.db(spec.database)
-lazy_frame = database.table(spec.table, **kwargs)
+lazy_frame = database.table(
+    spec.table,
+    filters=datarepo_filters,
+    columns=list(spec.selected_columns),
+)
 frame = lazy_frame.collect()
 ```
 
-That code lives in
-[`src/datarepo_doctor/adapters/python_datarepo.py`](src/datarepo_doctor/adapters/python_datarepo.py).
+Function tables receive `spec.arguments` instead of `filters`. This is very similar to how a DataRepo consumer retrieves a known table: resolve catalog, choose database/table, provide query inputs, select columns, and collect.
 
-### Similarity to an ordinary scientist query
+The monitor adds operational machinery around that ordinary query. It does not change the query abstraction.
 
-An ordinary user might write:
+## 8. Probe specifications
 
-```python
-database = catalog.db("science")
-result = database.table(
-    "recording_sessions",
-    filters=(Filter("subject_id", "=", selected_subject),),
-    columns=["session_id", "subject_id", "created_at"],
-).collect()
-```
+Every dashboard row begins as one `ProbeSpec` in `checks.py`.
 
-The doctor performs the same catalog/database/table/filter/column/collect sequence. The difference is
-purpose: a scientist uses the rows for analysis; the doctor validates a small expected slice and then
-discards it.
+### Identity fields
 
-## 5. The real data sources and four checks
-
-The production-style registry contains four live checks:
-
-| Check ID | Logical table | Access method | Literal physical source | Expected result |
-|---|---|---|---|---|
-| `aws-delta-products-sdk` | `public_science.products` | DataRepo Python SDK | `s3://aws-bigdata-blog/artifacts/delta-lake-crawler/sample_delta_table` | 5 rows, 4 columns |
-| `pudl-energy-parquet-sdk` | `public_science.energy_sources` | DataRepo Python SDK | `s3://pudl.catalyst.coop/v2024.11.0/core_eia__codes_energy_sources.parquet` | 5 rows, 5 columns |
-| `rnacentral-xrefs-function` | `public_science.rna_xrefs` | DataRepo Python SDK/function table | `hh-pgsql-public.ebi.ac.uk:5432/pfmegrnargs` | 2 rows, 3 columns |
-| `pudl-energy-roapi-http` | exported `public_science_energy_sources` | ROAPI HTTP SQL | The same versioned PUDL Parquet object | 5 rows, 5 columns |
-
-The PUDL URI is version-pinned so its expected contract is reproducible. The AWS tutorial Delta table
-and RNAcentral database are externally maintained. A remote outage or unexpected result change is a
-real unhealthy result because the product is explicitly checking the live access path.
-
-### One logical identity
-
-Every check reports the logical credential profile `doctor_reader` even though providers implement it
-differently:
-
-- public S3 reads are unsigned and require no individual AWS account;
-- RNAcentral exposes a published read-only `reader` account, with its password supplied through the
-  ignored `.env` file; and
-- controlled test sources create local read-only credentials associated with `doctor_reader`.
-
-The identity is a representative access profile, not a claim that every provider has a literal account
-with the exact same username.
-
-## 6. How the DataRepo catalog is built
-
-The catalog begins in [`demo_catalog/catalog.py`](demo_catalog/catalog.py):
-
-```python
-from datarepo.core import Catalog, ModuleDatabase
-from . import tables
-
-DEMO_CATALOG = Catalog(
-    {"public_science": ModuleDatabase(tables)},
-    package_name="demo_catalog",
-)
-```
-
-This creates one catalog database called `public_science`. `ModuleDatabase(tables)` inspects the
-objects exposed by [`demo_catalog/tables.py`](demo_catalog/tables.py).
-
-### Native Delta table
-
-```python
-products = DeltalakeTable(
-    name="products",
-    uri="s3://aws-bigdata-blog/artifacts/delta-lake-crawler/sample_delta_table",
-    schema=...,
-    unique_columns=["product_id"],
-)
-```
-
-The object is a logical table definition. It tells DataRepo which source implementation and URI to
-use. It does not contain the returned data.
-
-### Native Parquet table
-
-```python
-energy_sources = ParquetTable(
-    name="energy_sources",
-    uri="s3://pudl.catalyst.coop/v2024.11.0/core_eia__codes_energy_sources.parquet",
-    partitioning=[],
-    partitioning_scheme=PartitioningScheme.HIVE,
-)
-```
-
-This similarly maps the logical table to a real public Parquet object.
-
-### Custom function table
-
-```python
-@table(...)
-def rna_xrefs(accession_a: str, accession_b: str) -> NlkDataFrame:
-    ...
-```
-
-DataRepo does not expose a native PostgreSQL table type in the pinned public package, so the catalog
-uses its intended Python extension mechanism. The decorated function accepts explicit arguments,
-executes a parameterized read-only SQL query, and returns a Polars lazy frame. Users still retrieve it
-through `database.table("rna_xrefs", ...)`, not by calling the function directly.
-
-## 7. How a check is specified
-
-Production checks live beside the catalog in
-[`src/datarepo_doctor/registry/probes.py`](src/datarepo_doctor/registry/probes.py). Each `ProbeSpec` is
-immutable because Pydantic uses `ConfigDict(frozen=True)`.
-
-### Identity and display fields
-
-- `check_id`: stable machine ID used by the API, queue, schedules, and SQLite primary keys.
-- `display_name` and `description`: human-readable UI text.
-- `catalog`, `database`, and `table`: logical DataRepo identity.
-- `physical_source`: concise source type for the main table.
-- `source_owner`, `source_uri`, `source_version`, `source_license`, and
-  `source_documentation_url`: safe provenance shown in details.
-- `access_method`: `python_sdk` or `roapi_http`.
-- `environment`: `public_internet` for production checks.
-- `credential_profile`: always `doctor_reader`.
+- `check_id` is stable across restarts and persistence.
+- `display_name` and `description` explain the row.
+- `catalog`, `database`, and `table` identify the DataRepo object.
+- `access_method` chooses `python_sdk` or `roapi_http`.
+- source owner, URI, version, license, and documentation explain physical provenance.
 
 ### Query fields
 
-- `filters`: explicit DataRepo-style predicates for native tables.
-- `arguments`: explicit arguments for function tables.
-- `selected_columns`: the only columns allowed into the bounded result.
-- `sort_columns`: deterministic keys used before fingerprinting.
-- `query_description`: a human description whose sensitive literals are already redacted.
-- `object_store_profile` and `object_store_region`: select unsigned public S3 or controlled local
-  MinIO behavior without guessing based on a table name.
+- `filters` contain explicit DataRepo filter clauses.
+- `arguments` contain bounded function-table arguments.
+- `selected_columns` prevent an accidental unbounded column read.
+- `query_description` is safe display text with literal query values redacted.
+
+The API never serializes raw filter or argument structures. It provides a readable credential-free code example instead. For the current public probes, that example includes the public bounded literals so a reader can see the actual call. Future sensitive probes must keep result display disabled.
 
 ### Validation fields
 
-- `expected_schema`: exact ordered names, types, and nullability.
-- `expected_row_count`: exact number of required rows.
-- `expected_sha256`: digest of the canonical complete result.
+- `expected_schema` declares exact column order, types, and nullability.
+- `expected_row_count` declares the exact number of materialized rows.
+- `sort_columns` make row order deterministic.
+- `expected_sha256` declares the expected canonical result fingerprint.
 
 ### Operational fields
 
-- `timeout_seconds`: parent-process safety boundary.
-- `default_interval_minutes`: 60 by default.
-- `phase_offset_minutes`: 0, 5, 10, and 15 in registry order.
-- `spec_version`: manually readable contract version.
-- `spec_hash`: computed SHA-256 of the spec fields except the expected result SHA. It identifies the
-  retrieval/configuration contract separately from the content digest.
+- `timeout_seconds` is a hard safety boundary.
+- `default_interval_minutes` defaults to 60.
+- `phase_offset_minutes` staggers startup cadence.
+- `environment` identifies the logical execution environment.
+- `credential_profile` is always `doctor_reader`.
+- `spec_version` and the computed `spec_hash` identify the contract version.
 
-### Startup safety validation
+Pydantic validates the specification at import/startup. It rejects a probe with no filters or arguments, no columns, duplicate columns, invalid sort columns, schema-column mismatch, invalid fingerprint, invalid timeout, or obvious secrets.
 
-`ProbeSpec.validate_safety()` rejects a spec if:
+## 9. Clicking Check Now: complete walkthrough
 
-- it has neither filters nor function arguments and is therefore unbounded;
-- it selects no columns;
-- selected columns are duplicated;
-- schema names/order do not exactly equal selected columns;
-- sort columns are absent or are not selected; or
-- descriptions or arguments appear to contain passwords, tokens, secrets, access keys, credentials,
-  or embedded credential URLs.
+### Step 1: browser request
 
-Because the registry is imported during app composition, invalid production specs prevent a normal
-startup rather than becoming silently unsafe runtime checks.
-
-## 8. End-to-end walkthrough: clicking Check now
-
-We will trace the Delta check. The other checks reuse the same orchestration and validation.
-
-### Step 1: the browser sends a request
-
-The React `run` function in [`web/src/App.tsx`](web/src/App.tsx) sends:
+`static/app.js` sends:
 
 ```http
 POST /api/checks/aws-delta-products-sdk/run
 ```
 
-The browser does not execute DataRepo and never receives source credentials or result rows.
+The browser sends only the stable check ID. It does not construct the DataRepo query.
 
-### Step 2: FastAPI enqueues the check
+### Step 2: FastAPI delegates to the queue
 
-The `run_check` route in [`src/datarepo_doctor/api/app.py`](src/datarepo_doctor/api/app.py) calls:
+`app.py` calls `probe_queue.enqueue(check_id)`. An unknown ID returns HTTP 404.
 
-```python
-state = await probe_queue.enqueue(check_id)
-```
+### Step 3: deduplication
 
-It returns HTTP `202 Accepted`, which means the job was accepted, not necessarily completed.
+`ProbeQueue` checks its in-memory state. If the check is already queued or running, it returns that existing state. It does not add a duplicate.
 
-### Step 3: the queue deduplicates and orders work
+### Step 4: FIFO execution
 
-`ProbeQueue.enqueue()` checks the current in-memory state. If this check is already queued or running,
-it returns that existing state instead of inserting a duplicate. Otherwise it records `queued`, adds
-the check ID to an `asyncio.Queue`, and preserves FIFO order with other manual or scheduled jobs.
+The one async queue worker takes the earliest ID, marks it `running`, and calls the synchronous process runner in a helper thread. The event loop remains responsive to dashboard polling.
 
-### Step 4: the one queue worker marks it running
+### Step 5: fresh child process
 
-The queue owns exactly one `_work()` coroutine. It takes the next ID, changes state from `queued` to
-`running`, and calls the blocking executor via `asyncio.to_thread(...)`. Moving the blocking parent
-executor to a thread keeps FastAPI's event loop responsive while the probe process runs.
+`ProcessProbeExecutor` uses `multiprocessing.get_context("spawn")`. It creates a one-way pipe and starts `worker_main` in a fresh process.
 
-### Step 5: the parent spawns a fresh process
+The child receives a JSON `ProbeSpec`. Environment variables provide credentials. This matters because process arguments and SQLite never contain secret values.
 
-`ProcessProbeExecutor` in [`src/datarepo_doctor/execution/engine.py`](src/datarepo_doctor/execution/engine.py)
-uses Python multiprocessing with the `spawn` start method. It creates a one-way pipe and passes only
-the serialized `ProbeSpec` into a new child.
+### Step 6: access-method dispatch
 
-The parent then waits at most `timeout_seconds`. If the child is still alive, the parent kills it,
-reaps it, closes the pipe, and creates a safe `timeout` outcome. If the child exits without sending an
-outcome, the parent creates `worker_crash`.
+`execute_probe` imports `retrieve` inside the child. `retrieve` selects Python SDK or ROAPI based on the typed enum.
 
-### Step 6: the child selects the Python adapter
+Keeping DataRepo imports in the child also keeps heavy data libraries out of the long-lived FastAPI parent.
 
-`execute_probe()` in [`src/datarepo_doctor/execution/worker.py`](src/datarepo_doctor/execution/worker.py)
-checks `spec.access_method`. The Delta check chooses `PythonDataRepoAdapter`.
+### Step 7: timing begins
 
-Third-party DataRepo imports occur inside the isolated child. This helps contain native-library import
-failures and ensures each probe begins from a fresh process state.
+`perf_counter_ns()` starts immediately before supported user-path setup.
 
-### Step 7: the adapter imports the configured catalog
+- Python path: before catalog import.
+- ROAPI path: before SQL/request setup.
 
-The string `demo_catalog.catalog:DEMO_CATALOG` is split into a module and attribute. Python imports the
-module and reads the catalog object. This is timed as `catalog_import` and wrapped in the explicit
-`catalog_import` execution stage.
+This monotonic performance clock is appropriate for elapsed time because wall-clock changes cannot make it run backward.
 
-### Step 8: DataRepo resolves the database and table
+### Step 8: real retrieval
 
-The adapter executes:
+The Python path imports the catalog, resolves the table, creates DataRepo filters, requests only selected columns, calls the real DataRepo table, and fully calls `.collect()`.
 
-```python
-database = catalog.db("public_science")
-```
+The ROAPI path builds bounded SQL, sends the HTTP request, requires success, reads the complete body, decodes JSON, and normalizes declared columns.
 
-It confirms `products` is present in `database.tables(...)`. A missing logical table becomes the safe
-mode `table_not_found` rather than an unsanitized `KeyError` traceback.
+No probe opens S3 objects directly or connects to PostgreSQL outside the catalog function.
 
-### Step 9: monitor filters become DataRepo filters
+### Step 9: query latency stops
 
-The adapter transforms each domain `FilterClause` into a real `datarepo.core.Filter` and adds the
-declared selected columns:
+The primary latency stops only after the result has been fully materialized or the HTTP response fully decoded. It does not include validation, IPC, or SQLite persistence.
 
-```python
-kwargs["filters"] = tuple(Filter(column, operator, value) ...)
-kwargs["columns"] = list(spec.selected_columns)
-```
+### Step 10: full validation
 
-For public object storage it sets the unsigned S3 option and configured AWS region. No private AWS
-credential is loaded.
+The child validates exact row count, schema/types, deterministic sort, and SHA-256. Validation has its own diagnostic phase timing.
 
-### Step 10: the real DataRepo query executes
+### Step 11: approved display rows are copied and working rows are discarded
 
-This is the central supported user path:
+For a probe with `display_result_rows=True`, the child copies the already validated public bounded rows into the outcome. The working materialized list is then cleared. Probes default to `False`, so a new check does not expose values accidentally.
 
-```python
-lazy_frame = database.table("products", **kwargs)
-frame = lazy_frame.collect()
-```
+### Step 12: safe outcome crosses the pipe
 
-`database.table(...)` resolves the catalog's `DeltalakeTable`, applies filters and projection, and
-constructs/starts the underlying Delta retrieval. `.collect()` forces the entire five-row slice to be
-materialized. The adapter then converts only the declared columns into ordered dictionaries inside the
-child process.
+A healthy outcome contains query latency, diagnostic phases, total duration, versions, environment, identity, and—only for an opted-in public probe—the bounded result rows used by the dashboard.
 
-### Step 11: query latency stops
+An unhealthy outcome contains no query latency. It contains stage, mode, safe summary, optional scrubbed detail, and total duration.
 
-`user_query_latency_ms` begins before catalog import and ends after complete materialization and row
-conversion. Result validation is deliberately not included in this primary number.
+### Step 13: parent timeout behavior
 
-### Step 12: the child validates the complete result
+The parent waits at most `timeout_seconds`. If the child is still alive, the parent kills and reaps it and records `timeout`. Partial elapsed time is total probe duration, not user query latency.
 
-The shared pipeline verifies the exact row count, column order and types, deterministic sort, and
-SHA-256 fingerprint. No returned value is logged, persisted, or sent to the browser.
+If the child exits without a serialized outcome, the parent records `worker_crash`.
 
-### Step 13: rows are discarded
+### Step 14: persistence and continuation
 
-After validation succeeds, `result.rows.clear()` removes the materialized list before the boundary
-outcome is built. The child sends only JSON describing health, timings, versions, environment, spec,
-and safe failure fields.
+The parent replaces the one latest SQLite row for the check. The queue marks the job idle and calls `task_done()`, even after a failure. The next queued check can run.
 
-### Step 14: the parent persists one latest outcome
+### Step 15: dashboard update
 
-The queue receives the `ProbeOutcome` and calls `DoctorRepository.save_outcome()`. The check ID is the
-SQLite primary key, so a new completion inserts once and every later completion replaces that row's
-JSON. There is no history table.
+The browser polls `GET /api/checks` every two seconds. Running is shown as a neutral activity label beside the last completed health. It never becomes a third health classification.
 
-### Step 15: the queue continues
+## 10. Canonical validation
 
-In `finally`, the queue marks the check `idle` and calls `task_done()`. This happens even when the
-probe is unhealthy or crashes, so the next FIFO job is not stranded.
+Query completion alone is insufficient. A query can succeed while returning zero rows, missing rows, wrong columns, or changed values.
 
-### Step 16: polling updates the dashboard
+Validation happens in this order:
 
-React polls `GET /api/checks` every two seconds. The next response contains the last completed outcome,
-schedule, and current job state. The UI displays healthy plus latency on success, or unhealthy plus no
-latency on failure. Running is a separate neutral job indicator; it does not overwrite the previous
-completed health.
+1. Compare actual list length with `expected_row_count`.
+2. Verify every row has exactly the declared columns in declared order.
+3. Convert every value according to its declared type.
+4. Sort rows by `sort_columns`.
+5. serialize `drd-canonical-v1` JSON Lines.
+6. Compute SHA-256 and compare with `expected_sha256`.
 
-## 9. The four retrieval paths in detail
+Canonical type rules include:
 
-### 9.1 Python SDK to native Delta in public S3
+- null is an explicit tagged value and allowed only on nullable fields;
+- integers become decimal strings tagged with their width;
+- decimals are normalized without insignificant trailing zeros;
+- finite floats use exact hexadecimal representation;
+- booleans remain booleans;
+- dates use ISO `YYYY-MM-DD`;
+- timestamps become UTC with microseconds and `Z`;
+- strings are UTF-8 JSON strings;
+- column order follows the contract, not dictionary accident.
 
-The registry selects five fixed product IDs and four columns. The catalog maps `products` to a public
-AWS Delta URI with a declared Arrow schema. DataRepo's `DeltalakeTable` handles the Delta transaction
-log and object files. The monitor never calls Delta Lake or S3 directly in the normal probe.
+The expected fingerprint is computed when authoring/seeding the fixture contract, not during a normal run. Computing expected from observed data during the run would make every changed result pass.
 
-```text
-ProbeSpec filters/columns
-  → DataRepo Filter objects
-  → database.table("products", ...)
-  → DeltalakeTable
-  → unsigned public S3
-  → collect all 5 rows
-```
+## 11. Health and latency
 
-Why this path matters: a bucket can be reachable while its Delta log is missing, corrupt, unauthorized,
-or inconsistent with its data files. A native query proves much more than a bucket ping.
+Completed health is binary:
 
-### 9.2 Python SDK to native Parquet in public S3
+- **healthy**: complete retrieval and all validations passed;
+- **unhealthy**: anything else.
 
-The registry selects five fixed EIA energy codes and five columns. `energy_sources` is a DataRepo
-`ParquetTable` pointed at a versioned PUDL object. DataRepo constructs the Parquet scan, applies the
-filter/projection, and returns a lazy result that the doctor collects.
+Before the first completed run, the UI may say “Never checked.” That is initialization state, not a third health value.
 
-```text
-ProbeSpec filters/columns
-  → database.table("energy_sources", ...)
-  → ParquetTable
-  → public PUDL S3 object
-  → collect all 5 rows
-```
+Latency never determines health. A successful 200 ms and successful 20-second result are both healthy. The UI reports the number without inventing a threshold.
 
-Why this is separate from Delta: both use object storage, but their readers and metadata paths differ.
-Testing both proves two distinct native DataRepo table implementations.
+Timeout is a safety decision, not a claim that a query is “slow.” Once killed, the query did not successfully complete, so its query latency is `null`.
 
-### 9.3 Python SDK to a PostgreSQL-backed function table
+Diagnostic phases are honest rather than artificially identical:
 
-The probe supplies two fixed accession arguments. `database.table("rna_xrefs", accession_a=...,
-accession_b=..., columns=...)` resolves the decorated function. Inside that function:
+- Python: catalog import, table resolution, query construction/eager access, remaining materialization.
+- ROAPI: request setup, connect/server/transfer as observable from the client, response decode.
+- Both: validation and total probe duration.
 
-1. `psycopg` opens the RNAcentral connection using an environment-only DSN.
-2. `SET TRANSACTION READ ONLY` adds a runtime safety boundary.
-3. Parameterized SQL uses `WHERE ac = ANY(%s)`; values are parameters, not string-concatenated SQL.
-4. The complete two-row result is fetched.
-5. Values are converted to declared Python types and returned as a Polars lazy frame.
+The application does not claim source execution time or time-to-first-row because those boundaries are not reliably exposed by every library.
 
-The custom function contains source-specific SQL, but the user-facing retrieval remains DataRepo's
-catalog API. This is analogous to putting a provider-specific implementation behind a stable interface.
+## 12. Failures and privacy
 
-### 9.4 ROAPI HTTP to public Parquet
+The runner wraps risky blocks with an explicit stage. Typed exception chains determine the most truthful mode available.
 
-ROAPI is a read-only HTTP/SQL service. During startup, the `configure` container calls DataRepo's
-`export_to_roapi_tables(DEMO_CATALOG)`, keeps exactly the exportable PUDL table, and writes ROAPI YAML.
-The runtime request then follows:
-
-```text
-ProbeSpec
-  → bounded SQL generated by RoapiHttpAdapter
-  → POST http://roapi:8080/api/sql
-  → ROAPI table exported from the DataRepo catalog
-  → public PUDL Parquet object
-  → complete JSON response
-```
-
-This path does not call `database.table(...)` in the probe process on every request. Instead, DataRepo
-defines/exports the HTTP table surface and ROAPI executes the request. That distinction is honest and
-important: the Python checks are direct SDK use; the HTTP check is a DataRepo-generated retrieval
-surface.
-
-The adapter quotes identifiers, supports the allowed bounded operators, escapes string literals, adds
-an `ORDER BY`, requires a successful status, and decodes the full JSON body. ROAPI omits JSON object
-properties whose value is null. `_normalize_json_rows()` restores an omitted property only when the
-contract declares that column nullable. A missing required property remains a decode failure.
-
-## 10. Complete-result validation and fingerprinting
-
-Both adapters return the same internal shape: an ordered list of dictionaries containing only selected
-columns. The same pure validation pipeline handles both, preventing the HTTP path from receiving weaker
-checks than the Python path.
-
-### Validation order
-
-1. Verify the exact materialized row count.
-2. Verify every row's keys exactly match selected column names and order.
-3. Sort rows by the declared deterministic keys.
-4. Convert each value using its declared contract type and nullability.
-5. Serialize a versioned canonical byte stream.
-6. Compute SHA-256 and compare it with `expected_sha256`.
-
-### Why all three contract dimensions are needed
-
-- **Schema only** would miss deleted, duplicated, or changed rows.
-- **Schema + count** would miss a changed value when the number of rows stayed constant.
-- **Fingerprint only without explicit schema/count** would produce a less understandable failure and
-  make type expectations implicit.
-
-Together they answer whether the entire bounded expected result was retrieved correctly.
-
-### Canonical format: `drd-canonical-v1`
-
-The first UTF-8 JSON Lines record is a header containing the format version, ordered columns, and
-contract types. Every later line is an ordered array of tagged values. The implementation is in
-[`src/datarepo_doctor/domain/canonical.py`](src/datarepo_doctor/domain/canonical.py).
-
-Type rules include:
-
-| Type | Canonical treatment |
+| Stage | What was happening |
 |---|---|
-| null | Allowed only when `nullable=True`; tagged explicitly as null |
-| string | Preserved as Unicode text |
-| int32/int64 | Must be a non-boolean Python integer; serialized as decimal text |
-| bool | Must be a Boolean, not integer 0/1 |
-| decimal | Converted to `Decimal`, finite, normalized (`10.5000` becomes `10.5`) |
-| float64 | Must be finite; uses exact hexadecimal float representation |
-| date | ISO `YYYY-MM-DD`; datetime is not accepted as a date |
-| timestamp | Normalized to UTC with microseconds and a `Z` suffix |
+| `catalog_import` | Importing the configured Python catalog |
+| `table_resolution` | Resolving database and table |
+| `query` | Constructing/executing/materializing retrieval |
+| `response_decode` | Decoding and normalizing complete ROAPI JSON |
+| `validation` | Checking contract and fingerprint |
+| `worker` | Parent/child lifecycle |
 
-Canonical sorting removes dependence on source return order. Column order remains meaningful and is
-part of the schema. NaN and infinities are rejected because they do not provide a simple stable
-scientific contract here.
+Stable modes include authentication, authorization, DNS, connection, source-not-found, HTTP, execution, decode, schema, count, fingerprint, timeout, crash, and unknown.
 
-### Privacy benefit
+The UI shows four layers when safe:
 
-The expected digest proves equality to a reviewed fixture result without putting result values in
-SQLite, API responses, logs, or screenshots. A SHA-256 digest is not a substitute for access control,
-but for these bounded fixtures it provides a compact correctness contract.
+1. stage;
+2. stable machine-readable mode;
+3. safe human summary; and
+4. optional exception class plus scrubbed reason.
 
-## 11. Health, latency, phases, and failures
+Raw exceptions are dangerous. A driver can include a DSN, URL query string, SQL literal, secret assignment, object path, or returned row. The sanitizer removes URLs, credential-like assignments, quoted values, long token-like strings, line breaks, and excess length. For unknown/database/object-store messages, it exposes only the exception class rather than guessing that arbitrary text is safe.
 
-### Binary completed health
+Full tracebacks are never persisted or sent to the browser.
 
-A completed run is either `healthy` or `unhealthy`:
+## 13. Queue and scheduler
 
-- healthy means the query completed and every validation passed;
-- unhealthy means any retrieval, decode, validation, timeout, or worker condition failed.
+There is one `asyncio.Queue` and one worker task. Both manual and scheduled requests call the same `enqueue` method.
 
-`never checked` is only an initialization display when no outcome exists. `queued` and `running` are
-job states, not health categories. The UI retains the previous completed health while a new job runs.
+Global concurrency is one. This makes source load predictable and timing easy to interpret.
 
-### Latency never changes health
+Every schedule row stores:
 
-There is no slow threshold, degraded state, SLO, or alert. A successful 500 ms and 5,000 ms query are
-both healthy if their complete results validate. The dashboard reports the number and lets a human
-interpret it.
+- interval in minutes;
+- fixed phase offset;
+- next run timestamp;
+- enabled flag; and
+- updated timestamp.
 
-### Primary latency boundary
+Default intervals are 60 minutes. Registry order creates offsets 0, 5, 10, and 15 minutes.
 
-For Python SDK checks, `user_query_latency_ms` starts before catalog import and ends after full collect
-and conversion. It includes catalog import, table resolution, query construction/source access, and
-remaining materialization.
+Changing an interval sets the next run to now plus the new interval. Enabling a disabled schedule makes it due. A manual run never calls schedule advancement, so it does not reset cadence.
 
-For ROAPI, it starts before SQL/request setup and ends after complete response decoding. It includes
-request setup, connection/server/transfer, and decode.
-
-Validation and parent persistence are excluded from primary latency. They appear in phase or total
-probe timing. Only healthy outcomes may contain primary latency; Pydantic enforces this invariant.
-
-### Timeout is not “too slow”
-
-The timeout is a safety boundary. When the parent kills a child, the outcome is unhealthy with mode
-`timeout`, query latency is null, and any partial elapsed time is not presented as successful latency.
-
-### Stages and modes
-
-A **stage** says where execution was when failure occurred. A **mode** says what kind of failure it was.
-
-| Stage | Examples |
-|---|---|
-| `catalog_import` | catalog module cannot import |
-| `table_resolution` | logical table is missing |
-| `query` | network, authentication, source, SQL, or query execution failure |
-| `response_decode` | HTTP response cannot become the expected rows |
-| `validation` | schema, row count, or fingerprint mismatch |
-| `worker` | timeout, child crash, unexpected isolation failure |
-
-Stable modes include `authentication_error`, `authorization_error`, `dns_error`, `connection_error`,
-`source_not_found`, `http_error`, `query_execution_error`, `response_decode_error`,
-`schema_mismatch`, `row_count_mismatch`, `result_fingerprint_mismatch`, `timeout`, `worker_crash`, and
-`unknown`.
-
-`execution_stage()` wraps exceptions with the current stage and truthful fallback. `classify_exception()`
-walks the typed causal chain for domain errors, socket DNS errors, HTTPX exceptions/statuses, structured
-botocore codes, and psycopg exception classes. It returns constant safe summaries. It does not persist
-raw exception messages, internal URLs, query values, rows, or tracebacks.
-
-When a third-party library collapses a cause into an opaque exception, the app reports a truthful
-general mode such as `query_execution_error` instead of pretending to know more from brittle text.
-
-## 12. Subprocess isolation and timeouts
-
-The FastAPI process owns scheduling, queueing, persistence, and APIs. It must survive a bad probe.
-`ProcessProbeExecutor` therefore runs exactly one spec in a fresh `spawn` child.
-
-### What crosses into the child
-
-Only `ProbeSpec.model_dump_json()` crosses in. Credentials are not embedded in it; the child inherits
-the necessary environment variables from its container process.
-
-### What crosses back
-
-Only `ProbeOutcome.model_dump_json()` crosses back through a one-way pipe. A DataFrame, returned row,
-raw HTTP body, connection object, credential, or traceback never crosses.
-
-### Lifecycle
-
-1. Create a one-way pipe.
-2. Spawn the child with `worker_main` and spec JSON.
-3. Close the parent's unused send endpoint.
-4. Join for at most the configured timeout.
-5. If alive, kill and reap the child, then emit `timeout`.
-6. If an outcome is available, validate its strict Pydantic model.
-7. If the child exited silently, emit `worker_crash`.
-8. Close the receive endpoint in all cases.
-
-The queue also catches an unexpected parent executor exception and creates a worker-crash outcome, so
-its `finally` block can return the check to idle and advance.
-
-## 13. The FIFO queue and recurring scheduler
-
-### One shared queue
-
-`ProbeQueue` uses one `asyncio.Queue[str]`. Both API-triggered and scheduler-triggered jobs call the
-same `enqueue()` method. One `_work()` task means global concurrency is exactly one.
-
-### Deduplication
-
-An in-memory `JobState` map records `idle`, `queued`, or `running`. If a check is already queued/running,
-another request receives the existing state. Different checks remain distinct FIFO entries.
-
-### Scheduled cadence
-
-Each schedule stores interval, phase offset, enabled state, and next run. New checks are initialized at
-the current UTC minute plus their phase offsets: 0, 5, 10, and 15 minutes. All default intervals are
-60 minutes.
-
-The scheduler loops once per second. It reads schedules in stable registry order and enqueues the first
-enabled due check. It then advances that check's `next_run_at` by whole intervals until the timestamp is
-future-facing. It intentionally stops after one due check per loop, so a restart with many overdue
-checks restores them gradually instead of creating a thundering herd.
-
-### Manual versus scheduled runs
-
-A manual run never edits `next_run_at`. Changing an interval sets `next_run_at` to now plus the new
-interval. Re-enabling a disabled schedule makes it due now. The allowed range is 5 minutes through
-10,080 minutes (seven days).
+After restart, persisted schedules are restored. If several are overdue, `enqueue_due` takes only the first registry item on each one-second tick. This avoids putting every check into the queue at the same instant.
 
 ## 14. SQLite persistence
 
-SQLAlchemy maps two and only two tables:
+SQLAlchemy maps two tables:
 
 ### `check_schedule`
 
-One row per check stores `check_id`, interval, phase offset, next run, enabled flag, and update time.
-Overrides survive app restarts because the Compose `app-data` volume preserves the SQLite file.
+One row per configured check. Overrides and next-run metadata survive restart.
 
 ### `latest_probe_run`
 
-One row per check stores safe outcome JSON and checked time. `check_id` is the primary key. Saving a
-new completion replaces the existing row transactionally. There is no historical run table.
+One row per check. Saving an outcome inserts or replaces its JSON. There is no history table.
 
-At startup, the repository creates missing tables, removes schedule/outcome rows for checks no longer
-in the registry, and adds schedules only for new IDs. Existing overrides are left intact.
+Raw responses, credentials, raw filter/argument structures, and tracebacks are absent. The latest outcome for an explicitly displayable public probe contains its small validated result rows. Because outcomes are JSON, this field requires no table migration.
 
-Not stored: returned rows, raw HTTP bodies, credentials, tracebacks, query literals, history, latency
-trends, percentiles, or anomalies.
+## 15. FastAPI and the browser
 
-## 15. The FastAPI backend
+FastAPI's lifespan initializes storage, starts the FIFO worker, restores due work, starts the scheduler, and cleanly stops tasks on shutdown.
 
-FastAPI composes the repository, queue, scheduler, routes, and static frontend in
-[`src/datarepo_doctor/api/app.py`](src/datarepo_doctor/api/app.py).
+The API is deliberately small:
 
-### Lifespan
-
-On startup it initializes SQLite, starts the FIFO worker, enqueues one overdue schedule if enabled, and
-starts the recurring scheduler. On shutdown it cancels the scheduler and queue worker cleanly.
-
-### Endpoints
-
-| Method and path | Purpose |
+| Method/path | Response or action |
 |---|---|
-| `GET /api/healthz` | App-process liveness only; says nothing about catalog health |
-| `GET /api/checks` | List safe specs, latest outcomes, schedules, and job states |
-| `GET /api/checks/{check_id}` | Add full safe validation contract and timing details |
-| `POST /api/checks/{check_id}/run` | Enqueue/deduplicate Check now; return 202 job state |
-| `PATCH /api/checks/{check_id}/schedule` | Change enabled/interval settings |
-| `GET /api/summary` | Counts and single-worker state |
+| `GET /api/checks` | Safe check details, readable query code, latest outcomes/displayable rows, schedules, and jobs |
+| `POST /api/checks/{id}/run` | HTTP 202 plus queued/running state |
+| `PATCH /api/checks/{id}/schedule` | Updated persisted schedule |
+| `GET /api/healthz` | `{ "status": "alive" }` for app liveness |
 
-`_safe_spec()` deliberately omits filter values and function arguments from API output. It includes
-safe provenance, redacted query description, validation metadata in detail, and spec identifiers.
+`/api/healthz` says nothing about catalog health.
 
-Unknown IDs return 404. Empty or invalid schedule changes return 422. No WebSocket exists; polling is
-simple and sufficient at this scale.
+The browser uses three files:
 
-### Serving one production application
+- `index.html` provides semantic page structure and loading placeholders.
+- `styles.css` provides responsive, keyboard-visible styling without animation.
+- `app.js` polls and safely creates DOM elements.
 
-The Docker image builds React into static files. FastAPI mounts hashed assets under `/assets` and
-returns `index.html` for frontend routes. This produces one application origin on port 8000, avoiding
-cross-origin configuration in production while retaining Vite for development.
+Dynamic values use `textContent` or text nodes, not `innerHTML`. That prevents an error string or source description from becoming executable markup.
 
-## 16. The React dashboard
+Every check has a concise row and an expandable diagnostic row. Its detail area shows the retrieval path, physical source, readable query code, timing or failure, and the data received by an opted-in successful public probe. The browser remembers expanded rows and restores focused controls after polling.
 
-React renders UI from typed `Check`, `Outcome`, and `Schedule` interfaces in
-[`web/src/types.ts`](web/src/types.ts). `App.tsx` owns three main state values: checks, selected detail,
-and an API error message.
+React was unnecessary here because the page has one data source, four rows, simple actions, and no complex client-side domain state. Removing it eliminates npm, a bundler, TypeScript duplication, a Node Docker stage, and a separate frontend test toolchain.
 
-### Polling
+## 16. Docker and startup
 
-An effect performs an initial fetch and repeats every two seconds. `GET /api/checks` refreshes health,
-latency, age, schedule, and job status. If a detail drawer is open, list polling refreshes its changing
-fields while preserving the validation contract loaded by the detail endpoint.
+The Dockerfile has one Python runtime stage and one test stage based on it. It:
 
-### Main table
+1. copies Python metadata and source;
+2. installs the package;
+3. installs the API-compatible CPU-portable Polars 1.12 wheel;
+4. runs as a non-root `doctor` user; and
+5. starts exactly one Uvicorn worker.
 
-Each row shows logical check/table, physical source, access method, latest binary health, successful
-latency or an em dash, last checked age, next run, interval select, and Check now button. A queued or
-running button is disabled to reflect server deduplication.
+Multiple Uvicorn workers are unsupported. Each would create its own in-memory queue and scheduler, breaking the global one-at-a-time guarantee.
 
-### Detail drawer
+Normal Compose services are:
 
-Clicking a check fetches the detail endpoint and shows retrieval identity, redacted query description,
-source provenance, validation contract, success timing phases or failure details, and build/spec/DataRepo
-versions. Escape and the close button dismiss it; semantic dialog labels and focus-visible styles
-support keyboard use. CSS includes responsive layouts and reduced-motion behavior.
+1. `configure`: generate/validate ROAPI configuration from catalog-adjacent metadata;
+2. `roapi`: expose the public PUDL table through HTTP;
+3. `app`: serve FastAPI, the queue/scheduler, and dashboard.
 
-### What the browser never receives
+The test profile additionally starts MinIO, PostgreSQL, read-only credentials, controlled fixture seeding, and the integration-test container.
 
-The UI never receives result rows, credentials, raw responses, raw exceptions, or filter/argument
-literals. It is a viewer/controller for safe operational metadata.
+## 17. Install and run from zero
 
-## 17. Docker, Compose, and startup order
+### Docker path
 
-### Dockerfile stages
-
-The `web` stage uses Node and Vite to type-check/build static assets. The `runtime` stage uses Python
-3.12, installs the project and pinned public DataRepo package, replaces Polars with the compatible LTS
-CPU wheel, copies tests and frontend assets, creates an unprivileged `doctor` user, and starts Uvicorn.
-The `test` stage adds pytest, Ruff, and mypy.
-
-### Normal Compose services
-
-1. **configure** runs `python -m datarepo_doctor.seed` without local-fixture mode. It asks DataRepo to
-   export the PUDL table and writes ROAPI YAML plus checked contract metadata to the `generated` volume.
-2. **roapi** waits for configure, loads that YAML, reads public S3 unsigned, and exposes port 8080.
-3. **app** waits for configure completion and ROAPI health, loads `.env`, mounts SQLite from `app-data`,
-   and exposes the dashboard/API on port 8000.
-
-Docker Compose creates a private service-name network, so the app reaches `http://roapi:8080` even
-though the browser reaches `http://localhost:8000`.
-
-### Named volumes
-
-- `generated`: transient generated ROAPI configuration shared with ROAPI.
-- `app-data`: persistent SQLite file.
-- `minio-data` and `postgres-data`: controlled test fixture storage.
-
-### Test profile
-
-`docker compose --profile test ...` additionally starts MinIO, PostgreSQL, `minio-init`, `local-seed`,
-and the test container. These exist so fault tests can safely remove paths, use bad credentials, stop
-services, or control expected values. They are not the normal dashboard's sources.
-
-`local-seed --local-fixtures` creates the MinIO bucket/reader, writes genuine Delta and Parquet data,
-creates PostgreSQL data and a read-only role, and verifies local expected fingerprints. Seeding is the
-only place direct source access is intentionally allowed.
-
-## 18. Security and privacy
-
-Security is enforced by several independent layers:
-
-1. **Read-only intent:** probes only retrieve data. RNAcentral and local PostgreSQL transactions are
-   explicitly read-only; local fixture permissions grant SELECT only.
-2. **Environment-only secrets:** `.env` is ignored by Git. Specs reject secret-like content. Compose
-   constructs DSNs at runtime.
-3. **One representative profile:** the UI describes `doctor_reader`, avoiding accidental claims about
-   multiple user personas.
-4. **Bounded queries:** every check must have filters or arguments, selected columns, expected count,
-   and a timeout.
-5. **Process boundary:** rows and credentials remain inside the child. Only safe outcome JSON returns.
-6. **Safe classification:** typed errors become constant summaries; tracebacks and raw messages do not
-   enter SQLite or API output.
-7. **Latest-only storage:** less operational data exists to expose.
-8. **Unprivileged container:** the runtime runs as the `doctor` user rather than root.
-9. **API redaction:** safe specs omit filter values and function arguments.
-
-The application itself has no login product because it is designed as a local/internal tool. Port 8000
-should not be exposed to an untrusted network without an organization-level reverse proxy, network
-policy, and authentication layer.
-
-Never commit `.env`, paste its DSNs into issues, print result rows while debugging, or add raw exception
-logging. `.env.example` contains placeholders only.
-
-## 19. Testing and quality checks
-
-### Unit tests
-
-Unit tests run without depending on live source contents and cover:
-
-- unsafe `ProbeSpec` rejection and stable spec hashing;
-- all canonical types, deterministic bytes, schema/count/fingerprint failures, and column order;
-- typed exception classification and safe summary redaction;
-- FIFO sequential execution, duplicate suppression, and continuation after executor crash;
-- schedule staggering, interval persistence, registry pruning, manual cadence, and overdue restoration;
-- API omission of filter values and arguments; and
-- ROAPI nullable-property normalization versus required-property rejection.
-
-### Integration tests
-
-The Compose test profile runs seven successful real paths: four public production checks plus controlled
-local Delta, Parquet, and PostgreSQL paths. Fault cases verify wrong schema, row count, fingerprint,
-stopped ROAPI/PostgreSQL, invalid object credentials/path, hanging child timeout, child crash, and
-successful execution of the next queued check.
-
-Some object-store libraries expose only an opaque error. Tests accept the documented truthful fallback
-instead of forcing false precision.
-
-### Frontend tests and static quality
-
-Vitest and React Testing Library check rendering and provenance interaction. ESLint checks browser code,
-TypeScript checks types, and Vite produces the production bundle. Ruff checks Python style/bugs and mypy
-checks strict Python types. The full commands are:
+1. Install Git and Docker Desktop/Engine with Compose.
+2. Clone the repository.
+3. Copy `.env.example` to `.env`.
+4. Obtain the currently published RNAcentral public reader password from its linked documentation and set `DOCTOR_RNACENTRAL_PASSWORD`.
+5. Run:
 
 ```bash
-pytest tests/unit
-ruff check .
-mypy src
-cd web
-npm run lint
-npm run typecheck
-npm test -- --run
-npm run build
+docker compose up --build
 ```
 
-Real integrations run with:
-
-```bash
-docker compose --profile test run --rm --build test
-```
-
-## 20. Run the application from zero
-
-### Prerequisites
-
-Install Git and Docker Desktop with Docker Compose. For local non-container development, install Python
-3.12 or 3.13 and Node.js. Ensure outbound access to public HTTPS/S3 and PostgreSQL port 5432.
-
-### Clone and configure
-
-```bash
-git clone https://github.com/aliiqbal24/DataRepo-Doctor.git
-cd DataRepo-Doctor
-cp .env.example .env
-```
-
-PowerShell equivalent:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Visit RNAcentral's public database documentation, obtain its published public-reader password, and
-replace only the placeholder value of `DOCTOR_RNACENTRAL_PASSWORD` in `.env`. Do not commit that file.
-
-### Start
-
-```bash
-docker compose up --build -d
-```
-
-Then open <http://localhost:8000>. Compose will generate ROAPI configuration, start ROAPI, start the app,
-create/restore SQLite schedules, and enqueue due work. It does not seed normal data locally.
-
-### Observe
-
-```bash
-docker compose ps
-docker compose logs -f app configure roapi
-```
-
-Click **Check now** on several rows. The first becomes running and later clicks become queued. Polling
-will show completions in FIFO order. Open details to inspect provenance, validation, and timing.
-
-### Stop without deleting data
+6. Open `http://localhost:8000`.
+7. Click each Check Now button. Jobs will queue and run sequentially.
+8. Expand a row to inspect its source, validation, timings, or safe failure.
+9. Stop without deleting state:
 
 ```bash
 docker compose down
 ```
 
-Named volumes remain unless you explicitly request volume removal. Avoid `down -v` if you want schedule
-overrides and latest outcomes preserved.
+### Local Python path
 
-### Local development
+Use Python 3.12 or 3.13:
 
 ```bash
 python -m venv .venv
-python -m pip install -e ".[dev]"
-cd web
-npm ci
-npm run dev
 ```
 
-Run the Python API separately with `datarepo-doctor` or Uvicorn. Normal single-origin production uses
-the built frontend served by FastAPI; Vite is only the development server.
+Activate it, then:
 
-## 21. How to add a new check
+```bash
+pip install -e ".[dev]"
+datarepo-doctor
+```
 
-Adding a check is a contract change, not merely adding a dashboard row.
+ROAPI must still be reachable at `DOCTOR_ROAPI_URL`, and required source environment variables must be set.
 
-1. **Choose a small representative user query.** It must prove a useful supported path but remain safe
-   to materialize repeatedly.
-2. **Make the boundary deterministic.** Choose fixed filters or function arguments and explicit columns.
-3. **Define the DataRepo table.** Add a native table or `@table` function beside
-   `demo_catalog/tables.py`. Do not put credentials in code.
-4. **Add the `ProbeSpec`.** Include stable ID, provenance, access method, query, schema, count, sort,
-   digest, timeout, interval, offset, environment, and redacted description.
-5. **Compute/review the contract.** Retrieve the complete slice through the intended access path,
-   canonicalize it with the same pipeline, inspect correctness privately, and check in only count/hash.
-6. **Assign a stable phase offset.** Continue the five-minute sequence in registry order.
-7. **Add integration coverage.** Prove the source is reached through DataRepo or generated ROAPI—not a
-   direct test-only shortcut.
-8. **Add truthful fault coverage** where provider behavior differs.
-9. **Run every quality gate and browser flow.** Confirm safe API output and no row/secret persistence.
-10. **Document source stability and licensing.** A changed live source may intentionally make the check
-    unhealthy until a reviewed contract update.
+## 18. Testing
 
-Never add an unbounded query, empty selected columns, `limit(1)` substitute, storage ping, metadata-only
-lookup, or a normal registry entry that points to mocked data.
+### Unit tests
 
-## 22. Troubleshooting
+```bash
+pytest tests/unit
+```
 
-### The app is alive but checks are unhealthy
+These test probe safety, canonical values, schema/count/fingerprint failures, typed classification, error redaction, queue deduplication, sequential execution, crash recovery, schedule staggering, cadence, persistence, API redaction, static assets, and schedule controls.
 
-`/api/healthz` proves only the app process. Open check details for stage/mode. This separation is
-intentional: a healthy dashboard can report broken data access.
+### Real integrations and faults
 
-### RNAcentral authentication or connection failure
+```bash
+docker compose --profile test run --rm --build test
+```
 
-Confirm the published reader password is present in ignored `.env`, recreate the app container after
-changing it, and ensure outbound port 5432 is allowed. Do not print the DSN while debugging.
+The suite proves real DataRepo access to MinIO Delta, MinIO Parquet, and PostgreSQL function tables, plus real ROAPI HTTP. It also tests incorrect schema/count/fingerprint, stopped services, invalid paths/credentials, hanging functions, child crashes, and queue continuation.
 
-### Public S3 query fails
+### Static quality
 
-Confirm outbound network access and the configured region/unsigned setting. A missing external artifact
-is a legitimate unhealthy source outcome. Do not add a local fallback, because that would make the
-monitor claim the public path works when it does not.
+```bash
+ruff check .
+mypy src
+docker compose build app
+```
 
-### ROAPI is unhealthy
+There is no npm step. Browser behavior is verified against the production FastAPI-served page.
 
-Check `docker compose logs configure roapi`. Configure must export exactly one PUDL table and complete
-before ROAPI starts. ROAPI must load the generated volume and pass `/api/schema` before the app starts.
+## 19. Demonstrating failures safely
 
-### A check appears stuck
+Fault injection belongs in tests or temporary local environment changes, not the default registry.
 
-The parent should kill it at its safety timeout, persist `timeout`, return the row to idle, and continue.
-Check app logs and `/api/summary` worker state. A successful app health endpoint during the wait is
-expected.
+- Stop ROAPI, run its check, and expect `connection_error` with no latency.
+- Use a test probe with the wrong expected schema and expect `schema_mismatch`.
+- Change expected count and expect `row_count_mismatch`.
+- Change one controlled fixture value without changing count/schema and expect `result_fingerprint_mismatch`.
+- Run the hanging test function and expect `timeout`, followed by a healthy queued check.
+- Run the crashing test function and expect `worker_crash`, followed by a healthy queued check.
 
-### Check now does not add a second copy
+Restore the service or fixture and rerun. The one latest outcome should return to healthy.
 
-That is deduplication. If the same ID is queued/running, the endpoint returns existing state. Queue a
-different check to observe FIFO ordering.
+## 20. Adding a new check
 
-### Schedules changed after editing an interval
+1. Identify one supported user retrieval path worth proving.
+2. Choose a small deterministic slice. It must have explicit filters or function arguments.
+3. Select only necessary columns.
+4. Expose the source in `demo_catalog/` using the real public DataRepo interface.
+5. Add the `ProbeSpec` in `checks.py` with the next five-minute phase offset.
+6. Materialize the entire slice in an authoring/seeding context.
+7. Declare exact schema and row count.
+8. Compute the canonical fingerprint with `result_sha256` and review it before committing.
+9. Write a query description without credentials.
+10. Set `display_result_rows=True` only if every value is approved for browser display and SQLite persistence.
+11. Add unit and real integration tests.
+12. Verify the query-code and received-data sections in the expanded row.
 
-An interval edit intentionally sets next run to now plus the new interval. Manual runs do not move it.
-Existing overrides survive restart; removing a check ID prunes its stored records.
+Do not add a direct source ping, catalog-only import, `.limit(1)`, or metadata lookup and call it retrieval health.
 
-### Integration tests need MinIO/PostgreSQL
+## 21. Troubleshooting
 
-Use the Compose `test` profile command. Normal `docker compose up` intentionally omits those controlled
-services.
+### App is alive but checks are unhealthy
 
-### Python installation fails on 3.14
+That is possible and correct. `/api/healthz` proves only FastAPI liveness. Expand the failed row and inspect stage, mode, and safe detail.
 
-Use Python 3.12 or 3.13. The pinned public DataRepo/Polars dependency does not support this project's
-3.14 installation path.
+### RNAcentral fails
 
-## 23. Design decisions, limitations, and non-goals
+Confirm the public reader password is current, the environment variable is set, and outbound PostgreSQL traffic to port 5432 is permitted.
 
-### Why a modular monolith
+### Public S3 fails
 
-FastAPI, scheduling, queueing, persistence, and frontend serving live in one app deployment. The probe
-itself is isolated in a child process. This is enough separation for safety without Redis, Celery,
-Kafka, Kubernetes, or another worker service.
+Confirm outbound HTTPS works. The public tables use unsigned AWS access and explicit regions.
 
-### Why sequential execution
+### ROAPI fails
 
-The product measures a representative local user path, not throughput. One-at-a-time execution reduces
-contention and produces simpler, honest local behavior.
+Check `docker compose ps`, then ROAPI logs. The monitor should report connection or HTTP/decode failure truthfully.
 
-### Why latest-only persistence
+### Check Now does nothing new
 
-The operational question is current usability. History, p50/p95, charts, anomaly detection, and alerts
-would turn this into a general observability platform and increase retained data.
+If the same check is queued or running, deduplication returns its existing state. This is expected.
 
-### Why public live sources plus controlled test fixtures
+### A check times out
 
-Public AWS/PUDL/RNAcentral sources make the normal demonstration realistic: bytes come from external
-services through supported paths. Controlled MinIO/PostgreSQL fixtures make destructive fault tests
-repeatable and safe. Mixing those roles would either make the demo fake or the tests unreliable.
+The child should be killed and the next job should proceed. If the whole dashboard freezes, that is an application bug because the isolation guarantee was violated.
 
-### Known limitations
+### Interval change moved next run
 
-- The AWS Delta table is a public tutorial artifact, not Neuralink production data.
-- Public-source uptime and content are controlled by external owners.
-- One bounded query cannot represent every table shape, filter, permission, or analysis.
-- One logical identity cannot prove per-user authorization.
-- Fingerprints prove equality to expected bytes, not scientific truth or freshness.
-- The local dashboard has no built-in authentication and should remain on a trusted network.
-- ROAPI configuration uses `export_to_roapi_tables` because the pinned DataRepo wheel lacks the README's
-  shown `generate_config` function. DataRepo itself is not forked or modified.
+That is intentional: interval updates set the next run to now plus the new interval. Manual runs do not.
 
-### Explicit non-goals
+## 22. Security model
 
-No freshness, null-rate, duplicate, distribution, or scientific-quality monitoring; no AI diagnosis;
-no slow-query health thresholds; no alerts/trends/history; no multiple personas; no distributed or
-multi-region workers; no automatic remediation; and no direct-source ping as health.
+- All credentials come from environment variables.
+- The logical identity is `doctor_reader`.
+- Local MinIO and PostgreSQL fixture identities are read-only after seeding.
+- Probe specs reject obvious secrets.
+- API serialization omits filters and arguments.
+- Raw ROAPI bodies stay in the child.
+- Outcomes never contain credentials. Rows are included only by an explicit public-display opt-in.
+- Unknown unstructured errors expose only exception type.
+- Dynamic browser content is inserted as text.
+- The container runs as a non-root user.
 
-## 24. How to explain the project to someone else
+This internal MVP does not include user authentication. Do not expose it directly to an untrusted network without adding an approved access boundary outside the application.
+
+## 23. Limitations and non-goals
+
+The project intentionally does not implement freshness, null-rate, duplicates, distributions, scientific-quality checks, latency thresholds, degraded status, alerts, trends, history, percentiles, AI diagnosis, multiple identities, concurrent workers, distributed infrastructure, or remediation.
+
+Live public services can change or disappear. A source-side release can legitimately cause a fingerprint mismatch until the bounded contract is reviewed and versioned. That is a useful unhealthy signal, not a reason to calculate a new expectation automatically.
+
+## 24. How to explain the project
 
 ### Thirty-second version
 
-> DataRepo Doctor continuously runs four small, deterministic retrievals through DataRepo's real Python
-> and generated HTTP access paths. Each check reads the complete bounded result from public Delta,
-> Parquet, or PostgreSQL services, validates exact schema, count, and content fingerprint inside an
-> isolated process, discards the rows, and stores only the latest safe health and successful latency.
-> Manual and hourly staggered checks share one FIFO queue, and a FastAPI/React dashboard shows the result.
+> DataRepo Doctor is a synthetic retrieval monitor. It runs four small real queries through DataRepo's Python and ROAPI access paths using one read-only profile. Each query runs alone in a killable child process, fully materializes a bounded result, validates its schema, exact count, and fingerprint, and stores only the latest safe outcome. The dashboard shows binary health and successful latency. A failed query has a classified safe error and no latency.
 
-### Two-minute version
+### Why not a ping?
 
-1. DataRepo maps logical catalog tables to physical Delta, Parquet, and Python-backed sources.
-2. A typed registry defines exactly which filters/arguments, columns, schema, row count, fingerprint,
-   timeout, schedule, identity, and source provenance each monitor check uses.
-3. Manual and scheduled jobs enter one deduplicated FIFO queue.
-4. The parent spawns one fresh child per check and can kill it safely on timeout.
-5. The child performs the actual `catalog.db(...).table(...).collect()` call or ROAPI HTTP request.
-6. A shared canonical pipeline validates every bounded row and discards values.
-7. Only safe outcome JSON crosses back and replaces one SQLite latest-result row.
-8. React polls FastAPI and keeps health separate from neutral queued/running state.
-9. Local MinIO/PostgreSQL exist only for controlled integration and fault tests.
+A ping proves a server responds. It does not prove the catalog imports, the table resolves, credentials work, filters and columns are accepted, the full result transfers, or the returned content is correct.
 
-### Common questions
+### Why keep the child process if the goal is simplicity?
 
-**Is it really using DataRepo?** Yes. Three checks call the real DataRepo catalog/query system. The
-fourth calls ROAPI configured from a DataRepo catalog export.
+Because third-party data code can hang or crash. Without a killable child, one bad query can permanently stop all later scheduled checks. The process code is essential reliability complexity.
 
-**Is the data real and remote?** Yes in the default dashboard: AWS S3, PUDL S3, and RNAcentral
-PostgreSQL. Local sources are test-only.
+### Why keep fingerprint validation?
 
-**Does healthy mean all data is good?** No. It means one declared bounded retrieval exactly matched its
-contract at that time.
+Because successful execution can return incomplete or changed data. Count proves cardinality; schema proves shape; fingerprint proves deterministic content.
 
-**Does a long latency make it unhealthy?** No. Only retrieval/validation success determines health.
+### Why is the frontend now plain HTML and JavaScript?
 
-**Why hash the result?** To detect changed values or membership without retaining/displaying rows.
+Because its responsibility is small: poll one endpoint, render four rows, and send three actions. A framework added build tooling and duplicated types without simplifying the domain.
 
-**Why a child process?** So a hang or crash cannot permanently block the app or later checks.
+You understand the project when you can trace this sentence through the code:
 
-**Why not ping the bucket/database?** A ping does not prove the catalog, credentials, query engine,
-decoder, filters, and complete result work together.
-
-### Self-check: you understand the system when you can answer
-
-- What exactly does a healthy check prove, and what does it not prove?
-- Where is the real `database.table(...)` call?
-- How do `DeltalakeTable`, `ParquetTable`, and `@table` differ?
-- Why must `.collect()` happen?
-- Why are filters, selected columns, sort keys, count, schema, and digest all required?
-- What crosses the subprocess boundary?
-- Why is timeout unhealthy but not reported as query latency?
-- How do manual and scheduled jobs interact?
-- What survives a restart?
-- Why are MinIO and local PostgreSQL present but not production dashboard sources?
-
-## 25. Reference appendices
-
-### A. Repository map
-
-```text
-DataRepoDoctor/
-├── demo_catalog/                  DataRepo catalog, public and test table definitions
-├── infra/                         ROAPI image and MinIO read-only policy
-├── src/datarepo_doctor/
-│   ├── adapters/                  Python DataRepo and ROAPI HTTP execution
-│   ├── api/                       FastAPI composition/routes/static serving
-│   ├── domain/                    Pure contracts, errors, canonical validation
-│   ├── execution/                 Stages, classification, child process, FIFO queue
-│   ├── persistence/               SQLAlchemy rows and repository
-│   ├── registry/                  Four production ProbeSpecs
-│   ├── scheduling/                Recurring due-check loop
-│   ├── config.py                  Environment-backed app settings
-│   ├── main.py                    Uvicorn entry point
-│   └── seed.py                    ROAPI config and test-fixture seeding
-├── tests/                         Unit, real integration, and controlled faults
-├── web/                           React/TypeScript/Vite dashboard
-├── docker-compose.yml             Local service topology and test profile
-├── Dockerfile                     Frontend, runtime, and test images
-├── pyproject.toml                 Python dependencies/tools/package metadata
-├── README.md                      Operational quick start
-└── GUIDE.md                       This learning guide
-```
-
-### B. Technology responsibility table
-
-| Technology | Responsibility in this project |
-|---|---|
-| Python 3.12 | Backend, catalog, probes, validation, scheduling, tests |
-| DataRepo 0.0.2 | Catalog and supported data-query abstractions |
-| Polars | Lazy tabular results returned through DataRepo/function tables |
-| PyArrow | Explicit schemas and Parquet test writing |
-| delta-rs | Delta implementation used underneath the DataRepo path/seeding |
-| psycopg | Read-only PostgreSQL connectivity inside function tables/seeding |
-| HTTPX | ROAPI request and typed HTTP errors |
-| FastAPI/Uvicorn | Backend API, lifecycle, and static serving |
-| Pydantic v2 | Immutable specs, settings, outcomes, and invariants |
-| SQLAlchemy 2/SQLite | Latest outcome and schedule persistence |
-| asyncio | API-safe scheduler and FIFO worker coordination |
-| multiprocessing | Fresh child isolation and hard termination |
-| ROAPI | Generated read-only SQL-over-HTTP surface for Parquet |
-| React/TypeScript | Polling dashboard and safe typed UI state |
-| Vite | Frontend development and production bundle |
-| Docker Compose | Reproducible local services, network, volumes, health order |
-| pytest/Vitest | Backend/integration and frontend tests |
-| Ruff/mypy/ESLint/tsc | Static quality and type checks |
-
-### C. Environment variables
-
-| Variable | Purpose | Secret? |
-|---|---|---|
-| `DOCTOR_RNACENTRAL_PASSWORD` | Published RNAcentral reader credential | Treat as secret; ignored `.env` only |
-| `DOCTOR_ROAPI_URL` | Internal ROAPI base URL | No |
-| `DOCTOR_DATABASE_URL` | SQLite location | Usually no; may contain credentials for other DBs |
-| `DOCTOR_SCHEDULES_ENABLED` | Enable recurring scheduler | No |
-| `AWS_SKIP_SIGNATURE` / `AWS_REGION` | Public unsigned S3 behavior | No |
-| `DOCTOR_S3_*`, `MINIO_ROOT_*` | Controlled integration fixture access | Yes for keys/passwords |
-| `DOCTOR_POSTGRES_*`, `POSTGRES_ADMIN_PASSWORD` | Controlled integration fixture access | Yes for passwords/DSNs |
-
-### D. Source-of-truth file sequence
-
-When investigating behavior, read in this order:
-
-1. `registry/probes.py` — what should be queried and validated?
-2. `demo_catalog/tables.py` — what physical source implements the logical table?
-3. `adapters/python_datarepo.py` or `adapters/roapi_http.py` — how is access executed?
-4. `domain/canonical.py` — how is completeness/correctness proven?
-5. `execution/worker.py` and `engine.py` — what crosses isolation and how does timeout work?
-6. `execution/queue.py` and `scheduling/scheduler.py` — when and in what order does it run?
-7. `persistence/repository.py` — what survives?
-8. `api/app.py` — what is exposed safely?
-9. `web/src/App.tsx` — how does a person interact with it?
-10. `docker-compose.yml` — how are runtime services connected?
-
-If you can follow that sequence and the Delta walkthrough in section 8, you can reason about the entire
-application without treating any major component as magic.
+> A browser action enqueues a stable check ID; one worker spawns one child; the child performs a real supported DataRepo retrieval, stops successful latency after complete materialization, validates the result, optionally copies approved public rows for display, and returns one outcome that replaces the check's latest SQLite row.

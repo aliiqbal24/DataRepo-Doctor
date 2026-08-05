@@ -1,11 +1,10 @@
-"""Canonical result format.
+"""Full-result validation and the versioned canonical fingerprint format.
 
 The byte stream is UTF-8 JSON Lines. Line one declares ordered columns and
-contract types. Every following line is an ordered array of tagged values.
-Objects use sorted compact JSON keys. Decimal values are normalized strings,
-floats use an exact hexadecimal representation, and dates/timestamps use ISO
-8601 (timestamps are normalized to UTC with a ``Z`` suffix). This format is
-internal and versioned as ``drd-canonical-v1``.
+contract types. Each remaining line is an ordered array of tagged values.
+Rows are sorted by the declared keys. Decimals use normalized strings, floats
+use exact hexadecimal notation, and timestamps are normalized to UTC. The
+format is named ``drd-canonical-v1``.
 """
 
 from __future__ import annotations
@@ -18,8 +17,35 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from .errors import FingerprintMismatch, RowCountMismatch, SchemaMismatch
-from .models import ProbeSpec, SchemaField
+from datarepo_doctor.models import FailureMode, ProbeSpec, SchemaField
+
+
+class ProbeError(Exception):
+    def __init__(self, mode: FailureMode, safe_summary: str) -> None:
+        super().__init__(safe_summary)
+        self.mode = mode
+        self.safe_summary = safe_summary
+
+
+class SchemaMismatch(ProbeError):
+    def __init__(self) -> None:
+        super().__init__(FailureMode.SCHEMA_MISMATCH, "Result schema did not match the contract.")
+
+
+class RowCountMismatch(ProbeError):
+    def __init__(self, expected: int, actual: int) -> None:
+        super().__init__(
+            FailureMode.ROW_COUNT_MISMATCH,
+            f"Expected {expected} rows but materialized {actual} rows.",
+        )
+
+
+class FingerprintMismatch(ProbeError):
+    def __init__(self) -> None:
+        super().__init__(
+            FailureMode.RESULT_FINGERPRINT_MISMATCH,
+            "Result fingerprint did not match the bounded result contract.",
+        )
 
 
 def _decimal_text(value: Any) -> str:
@@ -96,7 +122,7 @@ def canonical_bytes(rows: Iterable[Mapping[str, Any]], spec: ProbeSpec) -> bytes
     for row in sorted_rows:
         values = [canonical_value(row[name], fields[name]) for name in expected_names]
         lines.append(json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return ("\n".join(lines) + "\n").encode()
 
 
 def result_sha256(rows: Iterable[Mapping[str, Any]], spec: ProbeSpec) -> str:

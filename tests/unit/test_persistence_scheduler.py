@@ -2,10 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from datarepo_doctor.execution.queue import ProbeQueue
-from datarepo_doctor.persistence.repository import DoctorRepository
-from datarepo_doctor.registry import PROBES
-from datarepo_doctor.scheduling import RecurringScheduler
+from datarepo_doctor.checks import PROBES
+from datarepo_doctor.orchestration import ProbeQueue, RecurringScheduler
+from datarepo_doctor.storage import DoctorRepository
 
 
 @pytest.fixture

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="DataRepo bounded retrieval health monitor">
+    <title>DataRepo Doctor</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-mark" aria-hidden="true">D</div>
+      <div class="brand"><strong>DataRepo Doctor</strong><span>Retrieval monitor</span></div>
+      <div class="profile"><i aria-hidden="true"></i>doctor_reader · public internet</div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <span class="eyebrow">Live public-source retrieval health</span>
+          <h1 id="page-title">Can scientists get the whole result?</h1>
+          <p>Real bounded reads through supported DataRepo access paths. Healthy means the complete result passed schema, exact row-count, and fingerprint validation.</p>
+        </div>
+        <div class="summary" aria-label="Check summary" aria-live="polite">
+          <div><strong id="healthy-count">0</strong><span>Healthy</span></div>
+          <div><strong id="unhealthy-count">0</strong><span>Unhealthy</span></div>
+          <div><strong id="unchecked-count">0</strong><span>Not checked</span></div>
+        </div>
+      </section>
+
+      <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+      <section class="panel" aria-labelledby="checks-title">
+        <div class="panel-head">
+          <div><h2 id="checks-title">Access-path checks</h2><p>Sequential execution · latest completed outcome only</p></div>
+          <span class="live"><i aria-hidden="true"></i>Polling live</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Check</th><th>Source / access</th><th>Latest health</th><th>Latency</th>
+                <th>Last checked</th><th>Next run</th><th>Schedule</th><th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="checks-body"></tbody>
+          </table>
+        </div>
+        <div id="loading" class="loading">Loading configured checks…</div>
+      </section>
+
+      <p class="footnote">Latency is descriptive and never changes health. Failed and timed-out checks show no query latency.</p>
+    </main>
+  </body>
+</html>

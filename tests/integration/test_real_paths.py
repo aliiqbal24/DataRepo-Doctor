@@ -5,18 +5,18 @@ from datetime import UTC, datetime
 
 import pytest
 
-from datarepo_doctor.domain.canonical import result_sha256
-from datarepo_doctor.domain.models import (
+from datarepo_doctor.checks import PROBES
+from datarepo_doctor.models import (
     AccessMethod,
     FailureMode,
     Health,
     ProbeSpec,
     SchemaField,
 )
-from datarepo_doctor.execution.engine import ProcessProbeExecutor
-from datarepo_doctor.execution.queue import ProbeQueue
-from datarepo_doctor.persistence.repository import DoctorRepository
-from datarepo_doctor.registry import PROBES
+from datarepo_doctor.orchestration import ProbeQueue
+from datarepo_doctor.runner import ProcessProbeExecutor
+from datarepo_doctor.storage import DoctorRepository
+from datarepo_doctor.validation import result_sha256
 from tests.local_probes import LOCAL_PROBES
 
 pytestmark = pytest.mark.integration
@@ -27,6 +27,10 @@ def test_real_access_path_materializes_and_validates_complete_result(spec):
     outcome = ProcessProbeExecutor().run(spec)
     assert outcome.health == Health.HEALTHY, outcome.model_dump()
     assert outcome.user_query_latency_ms is not None
+    if spec.display_result_rows:
+        assert len(outcome.result_rows) == spec.expected_row_count
+    else:
+        assert outcome.result_rows == ()
 
 
 def test_wrong_contracts_have_precise_failure_modes():

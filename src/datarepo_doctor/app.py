@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -12,12 +11,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from datarepo_doctor.checks import PROBES
 from datarepo_doctor.config import Settings
-from datarepo_doctor.domain.models import Health, ProbeOutcome, ProbeSpec
-from datarepo_doctor.execution.queue import ProbeQueue
-from datarepo_doctor.persistence.repository import DoctorRepository, ScheduleRecord
-from datarepo_doctor.registry import PROBES, get_probe
-from datarepo_doctor.scheduling import RecurringScheduler
+from datarepo_doctor.models import ProbeOutcome, ProbeSpec
+from datarepo_doctor.orchestration import ProbeQueue, RecurringScheduler
+from datarepo_doctor.retrieval import query_code
+from datarepo_doctor.storage import DoctorRepository, ScheduleRecord
 
 
 class SchedulePatch(BaseModel):
@@ -25,8 +24,10 @@ class SchedulePatch(BaseModel):
     interval_minutes: int | None = Field(default=None, ge=5, le=10080)
 
 
-def _safe_spec(spec: ProbeSpec, *, detail: bool = False) -> dict[str, Any]:
-    result: dict[str, Any] = {
+def _safe_spec(spec: ProbeSpec) -> dict[str, Any]:
+    """Return the complete UI contract without filters, arguments, or secrets."""
+
+    return {
         "check_id": spec.check_id,
         "display_name": spec.display_name,
         "description": spec.description,
@@ -43,19 +44,11 @@ def _safe_spec(spec: ProbeSpec, *, detail: bool = False) -> dict[str, Any]:
         "environment": spec.environment,
         "credential_profile": spec.credential_profile,
         "query_description": spec.query_description,
+        "query_code": query_code(spec),
+        "displays_result_rows": spec.display_result_rows,
         "spec_version": spec.spec_version,
         "spec_hash": spec.spec_hash,
     }
-    if detail:
-        result["validation_contract"] = {
-            "selected_columns": list(spec.selected_columns),
-            "sort_columns": list(spec.sort_columns),
-            "expected_schema": [field.model_dump() for field in spec.expected_schema],
-            "expected_row_count": spec.expected_row_count,
-            "expected_sha256": spec.expected_sha256,
-            "timeout_seconds": spec.timeout_seconds,
-        }
-    return result
 
 
 def _schedule_json(schedule: ScheduleRecord) -> dict[str, Any]:
@@ -95,7 +88,7 @@ def create_app(
 
     app = FastAPI(
         title="DataRepo Doctor",
-        version="0.1.0",
+        version="0.2.0",
         description="Bounded DataRepo synthetic retrieval monitor",
         lifespan=lifespan,
     )
@@ -117,20 +110,6 @@ def create_app(
             }
             for spec in PROBES
         ]
-
-    @app.get("/api/checks/{check_id}")
-    def check_detail(check_id: str) -> dict[str, Any]:
-        try:
-            spec = get_probe(check_id)
-            schedule = repo.schedule(check_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Check not found") from exc
-        return {
-            **_safe_spec(spec, detail=True),
-            "latest_outcome": _outcome_json(repo.latest(check_id)),
-            "schedule": _schedule_json(schedule),
-            "job": asdict(probe_queue.state(check_id)),
-        }
 
     @app.post("/api/checks/{check_id}/run", status_code=status.HTTP_202_ACCEPTED)
     async def run_check(check_id: str, response: Response) -> dict[str, Any]:
@@ -157,32 +136,11 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _schedule_json(updated)
 
-    @app.get("/api/summary")
-    def summary() -> dict[str, Any]:
-        latest = repo.latest_all()
-        healthy = sum(outcome.health == Health.HEALTHY for outcome in latest.values())
-        unhealthy = sum(outcome.health == Health.UNHEALTHY for outcome in latest.values())
-        return {
-            "healthy": healthy,
-            "unhealthy": unhealthy,
-            "not_yet_checked": len(PROBES) - healthy - unhealthy,
-            "total": len(PROBES),
-            "worker": probe_queue.worker_state(),
-        }
+    static_dir = Path(__file__).with_name("static")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    dist = Path(os.getenv("DOCTOR_WEB_DIST", "/app/web/dist"))
-    if not dist.is_dir():
-        dist = Path(__file__).resolve().parents[3] / "web" / "dist"
-    if dist.is_dir():
-        assets = dist / "assets"
-        if assets.is_dir():
-            app.mount("/assets", StaticFiles(directory=assets), name="assets")
-
-        @app.get("/{full_path:path}", include_in_schema=False)
-        def frontend(full_path: str) -> FileResponse:
-            candidate = (dist / full_path).resolve()
-            if full_path and candidate.is_file() and dist.resolve() in candidate.parents:
-                return FileResponse(candidate)
-            return FileResponse(dist / "index.html")
+    @app.get("/", include_in_schema=False)
+    def dashboard() -> FileResponse:
+        return FileResponse(static_dir / "index.html")
 
     return app

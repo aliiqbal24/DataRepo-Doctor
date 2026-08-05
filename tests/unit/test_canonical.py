@@ -3,9 +3,15 @@ from decimal import Decimal
 
 import pytest
 
-from datarepo_doctor.domain.canonical import canonical_bytes, result_sha256, validate_result
-from datarepo_doctor.domain.errors import FingerprintMismatch, RowCountMismatch, SchemaMismatch
-from datarepo_doctor.domain.models import AccessMethod, ProbeSpec, SchemaField
+from datarepo_doctor.models import AccessMethod, ProbeSpec, SchemaField
+from datarepo_doctor.validation import (
+    FingerprintMismatch,
+    RowCountMismatch,
+    SchemaMismatch,
+    canonical_bytes,
+    result_sha256,
+    validate_result,
+)
 
 
 def all_types_spec(expected_sha256: str = "0" * 64, count: int = 1) -> ProbeSpec:
